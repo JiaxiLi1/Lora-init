@@ -6,6 +6,7 @@ import random
 import argparse
 import numpy as np
 import pandas as pd
+import wandb
 
 import torch
 import torch.nn as nn
@@ -204,7 +205,7 @@ def evaluate_model(
         "allenai/c4",
         "en",
         split="validation",
-        streaming=False,
+        streaming=True,
         trust_remote_code=True,
         # cache_dir=f"{args.data_dir}/c4",
     )
@@ -254,8 +255,9 @@ def evaluate_model(
     gathered_losses = [torch.zeros_like(total_loss) for _ in range(world_size)]
     dist.all_gather(gathered_losses, total_loss)
     total_loss = sum([t.item() for t in gathered_losses]) / world_size
+    perplexity = np.exp(total_loss)
 
-    return total_loss, evaluated_on_tokens, eval_time
+    return total_loss, evaluated_on_tokens, eval_time, perplexity
 
 
 def main(args):
@@ -307,21 +309,7 @@ def main(args):
         logger.remove()
 
     # initialize wandb without config (it is passed later)
-    if global_rank == 0:
-        if os.path.exists("./wandb_api.py"):
-            # wandb = None
-            import wandb
-            import wandb_api
 
-            wandb.login(key=wandb_api.KEY)
-            model_desc = os.path.basename(args.model_config).replace(".json", "")
-            wandb.init(
-                project=f"LORO-C4-{model_desc}",
-                name=args.desc,
-            )
-        else:
-            logger.warning("\nWandb API key not found, skipping wandb initialization\n")
-            wandb = None
 
     logger.info(f"Using dist with rank {global_rank} (only rank 0 will log)")
     logger.info("*" * 40)
@@ -334,7 +322,7 @@ def main(args):
         "allenai/c4",
         "en",
         split="train",
-        streaming=False,
+        streaming=True,
         trust_remote_code=True,
         # cache_dir=f"{args.data_dir}/c4",
     )
@@ -429,6 +417,11 @@ def main(args):
             "device": str(device),
         }
     )
+    if global_rank == 0:
+        wandb.init(
+            project="galore-c4",
+            name=args.desc,
+        )
 
     if global_rank == 0:
         if wandb is not None:
@@ -852,7 +845,7 @@ def main(args):
         # evaluation
         if update_step % args.eval_every == 0:
             logger.info(f"Performing evaluation at step {update_step}")
-            total_loss, evaluated_on_tokens, eval_time = evaluate_model(
+            total_loss, evaluated_on_tokens, eval_time, perplexity = evaluate_model(
                 model,
                 preprocess_batched,
                 pad_idx,
@@ -867,6 +860,7 @@ def main(args):
                         "final_eval_loss": total_loss,
                         "final_eval_tokens": evaluated_on_tokens,
                         "eval_times": eval_time,
+                        "perplexity_val_set": perplexity,
                     },
                     step=global_step,
                 )
@@ -980,7 +974,7 @@ def main(args):
     gc.collect()
     torch.cuda.empty_cache()
 
-    total_loss, evaluated_on_tokens, eval_time = evaluate_model(
+    total_loss, evaluated_on_tokens, eval_time, perplexity = evaluate_model(
         model,
         preprocess_batched,
         pad_idx,
@@ -996,6 +990,7 @@ def main(args):
                 "final_eval_loss": total_loss,
                 "final_eval_tokens": evaluated_on_tokens,
                 "eval_times": eval_time,
+                "perplexity_val_set": perplexity,
             },
             step=global_step,
         )
