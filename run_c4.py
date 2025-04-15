@@ -34,10 +34,24 @@ from loro_torch.loro_optim import LOROAdamW
 
 transformers.logging.set_verbosity_error()
 
+def str_to_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value.lower() in {"true", "1", "yes"}:
+        return True
+    elif value.lower() in {"false", "0", "no"}:
+        return False
+    else:
+        raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
 
 def parse_args():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("--c4_local", type=str_to_bool, default=True)
+    parser.add_argument("--train_data_path", type=str, default="en/c4-train.*.json.gz",
+                        help="Path to C4 training data files")
+    parser.add_argument("--val_data_path", type=str, default="en/c4-validation.*.json.gz",
+                        help="Path to C4 validation data files")
     parser.add_argument("--model_config", type=str, required=True)
     parser.add_argument("--use_hf_model", default=False, action="store_true")
     parser.add_argument("--continue_from", type=str, default=None)
@@ -198,17 +212,23 @@ def parse_args():
 
 @torch.no_grad()
 def evaluate_model(
-    model, preprocess_batched, pad_idx, global_rank, world_size, device, batch_size
+    model, preprocess_batched, pad_idx, global_rank, world_size, device, batch_size, c4_local
 ):
     _time = time.time()
-    val_data = datasets.load_dataset(
-        "allenai/c4",
-        "en",
-        split="validation",
-        streaming=True,
-        trust_remote_code=True,
-        # cache_dir=f"{args.data_dir}/c4",
-    )
+    if args.c4_local:
+        val_data = datasets.load_dataset('arrow', data_files=args.val_data_path, split="train", streaming=True,
+                                         trust_remote_code=True)
+    else:
+        val_data = datasets.load_dataset("c4", "en", split="validation", streaming=True, trust_remote_code=True)
+
+    # val_data = datasets.load_dataset(
+    #     "allenai/c4",
+    #     "en",
+    #     split="validation",
+    #     streaming=True,
+    #     trust_remote_code=True,
+    #     # cache_dir=f"{args.data_dir}/c4",
+    # )
     val_data = val_data.shuffle(seed=42)
     logger.info(f"Loaded validation dataset in {time.time() - _time:.2f} seconds")
 
@@ -318,14 +338,18 @@ def main(args):
         logger.info(f"{k:30} {v}")
     logger.info("*" * 40)
 
-    data = datasets.load_dataset(
-        "allenai/c4",
-        "en",
-        split="train",
-        streaming=True,
-        trust_remote_code=True,
-        # cache_dir=f"{args.data_dir}/c4",
-    )
+    if args.c4_local:
+        data = datasets.load_dataset('arrow', data_files=args.train_data_path, split="train", streaming=True)
+    else:
+        data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
+    # data = datasets.load_dataset(
+    #     "allenai/c4",
+    #     "en",
+    #     split="train",
+    #     streaming=True,
+    #     trust_remote_code=True,
+    #     # cache_dir=f"{args.data_dir}/c4",
+    # )
 
     seed_for_shuffle = 42
     logger.info(f"Shuffling data with seed {seed_for_shuffle}")
@@ -853,6 +877,7 @@ def main(args):
                 world_size,
                 device,
                 args.batch_size,
+                args.c4_local
             )
             if global_rank == 0 and wandb is not None:
                 wandb.log(
@@ -982,6 +1007,7 @@ def main(args):
         world_size,
         device,
         args.batch_size,
+        args.c4_local
     )
 
     if global_rank == 0 and wandb is not None:
