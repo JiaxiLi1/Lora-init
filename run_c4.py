@@ -802,6 +802,7 @@ def main(args):
         torch.cuda.synchronize()
         max_memory_GB = torch.cuda.max_memory_allocated() / 1024**3
         torch.cuda.reset_max_memory_allocated()
+        print(max_memory_GB)
 
         if update_step % 1000 == 0 or update_step < 10:
             print(
@@ -1016,7 +1017,7 @@ def main(args):
                 "final_eval_loss": total_loss,
                 "final_eval_tokens": evaluated_on_tokens,
                 "eval_times": eval_time,
-                "perplexity_val_set": perplexity,
+                "perplexity": perplexity,
             },
             step=global_step,
         )
