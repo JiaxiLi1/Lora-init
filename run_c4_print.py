@@ -6,7 +6,7 @@ import random
 import argparse
 import numpy as np
 import pandas as pd
-import wandb
+# import wandb
 
 import torch
 import torch.nn as nn
@@ -441,16 +441,16 @@ def main(args):
             "device": str(device),
         }
     )
-    if global_rank == 0:
-        wandb.init(
-            project="galore-c4",
-            name=args.desc,
-        )
+    # if global_rank == 0:
+    #     wandb.init(
+    #         project="galore-c4",
+    #         name=args.desc,
+    #     )
 
     if global_rank == 0:
-        if wandb is not None:
-            wandb.config.update(run_config, allow_val_change=True)
-            wandb.save(os.path.abspath(__file__), policy="now")  # save current script
+        # if wandb is not None:
+        #     wandb.config.update(run_config, allow_val_change=True)
+        #     wandb.save(os.path.abspath(__file__), policy="now")  # save current script
         # fix tqdm visual length to 80 so that the progress bar
         # doesn't jump around when changing from external display to laptop
         pbar = tqdm(
@@ -799,10 +799,9 @@ def main(args):
         update_time = time.time() - update_time
 
         # verbose logging
-        # torch.cuda.synchronize()
-        # max_memory_GB = torch.cuda.max_memory_allocated() / 1024**3
-        # torch.cuda.reset_max_memory_allocated()
-        # print(max_memory_GB)
+        torch.cuda.synchronize()
+        max_memory_GB = torch.cuda.max_memory_allocated() / 1024**3
+        torch.cuda.reset_max_memory_allocated()
 
         # if update_step % 1000 == 0 or update_step < 10:
         #     print(
@@ -839,7 +838,6 @@ def main(args):
                     "update_step": update_step,
                     "global_step": global_step,
                     "config": run_config,
-                    "wandb": wandb.run.dir,
                     "dtype": args.dtype,
                 }
                 torch.save(
@@ -859,12 +857,12 @@ def main(args):
                 print(f"\nModel saved at {current_model_directory} successfully.\n")
 
             # save wandb related info
-            if wandb is not None:
-                wandb_info = {
-                    "wandb_id": wandb.run.id,
-                }
-                with open(f"{args.save_dir}/wandb.json", "w") as f:
-                    json.dump(wandb_info, f, indent=4)
+            # if wandb is not None:
+            #     wandb_info = {
+            #         "wandb_id": wandb.run.id,
+            #     }
+            #     with open(f"{args.save_dir}/wandb.json", "w") as f:
+            #         json.dump(wandb_info, f, indent=4)
 
         # evaluation
         if update_step % args.eval_every == 0:
@@ -879,16 +877,9 @@ def main(args):
                 args.batch_size,
                 args.c4_local
             )
-            if global_rank == 0 and wandb is not None:
-                wandb.log(
-                    {
-                        "final_eval_loss": total_loss,
-                        "final_eval_tokens": evaluated_on_tokens,
-                        "eval_times": eval_time,
-                        "perplexity_val_set": perplexity,
-                    },
-                    step=global_step,
-                )
+            if global_rank == 0 :
+                print(f"global_step {global_step} update_step {update_step} eval_loss: {total_loss:.4f}, eval_tokens: {evaluated_on_tokens}, eval_times: {eval_time:.2f}s, perplexity_val_set: {perplexity:.4f}")
+
 
             # track evaluation stats
             df_eval_tmp = {
@@ -916,31 +907,32 @@ def main(args):
         batches_in_update = args.gradient_accumulation * world_size
 
         # log to wandb
-        if global_rank == 0:
-            wandb_dict = {
-                "global_step": global_step,
-                "update_step": update_step,
-                "loss": loss.item(),
-                "lr": lr,
-                "tokens_seen": tokens_seen,
-                "throughput_tokens": tokens_in_update / update_time,
-                "throughput_examples": args.total_batch_size / update_time,
-                "throughput_batches": batches_in_update / update_time,
-            }
-
-            if wandb is not None:
-                wandb.log(wandb_dict, step=global_step)
-
-            # track training stats
-            df_train_tmp = {k: [v] for k, v in wandb_dict.items()}
-            df_train_tmp["use_exact_loro"] = [use_exact_loro]
-            df_train_tmp["opt_step"] = [scheduler.last_epoch]
-            df_train_tmp["update_time"] = [update_time]
-            df_train_tmp = pd.DataFrame(df_train_tmp)
-            df_train_all = pd.concat([df_train_all, df_train_tmp], ignore_index=True)
-            df_train_all.to_csv(
-                f"{args.save_dir}/train_stats_{args.timestamp}.csv", index=False
-            )
+        # if global_rank == 0:
+        #     wandb_dict = {
+        #         "global_step": global_step,
+        #         "update_step": update_step,
+        #         "loss": loss.item(),
+        #         "lr": lr,
+        #         "tokens_seen": tokens_seen,
+        #         "throughput_tokens": tokens_in_update / update_time,
+        #         "throughput_examples": args.total_batch_size / update_time,
+        #         "throughput_batches": batches_in_update / update_time,
+        #         "max_memory_GB": max_memory_GB,
+        #     }
+        #
+        #     if wandb is not None:
+        #         wandb.log(wandb_dict, step=global_step)
+        #
+        #     # track training stats
+        #     df_train_tmp = {k: [v] for k, v in wandb_dict.items()}
+        #     df_train_tmp["use_exact_loro"] = [use_exact_loro]
+        #     df_train_tmp["opt_step"] = [scheduler.last_epoch]
+        #     df_train_tmp["update_time"] = [update_time]
+        #     df_train_tmp = pd.DataFrame(df_train_tmp)
+        #     df_train_all = pd.concat([df_train_all, df_train_tmp], ignore_index=True)
+        #     df_train_all.to_csv(
+        #         f"{args.save_dir}/train_stats_{args.timestamp}.csv", index=False
+        #     )
 
         update_time = time.time()
 
@@ -972,7 +964,6 @@ def main(args):
             "update_step": update_step,
             "global_step": global_step,
             "config": run_config,
-            "wandb": wandb.run.dir if wandb is not None else None,
             "dtype": args.dtype,
         }
         torch.save(optimizer_checkpoint, f"{current_model_directory}/optimizer.pt")
@@ -1009,17 +1000,20 @@ def main(args):
         args.c4_local
     )
 
-    if global_rank == 0 and wandb is not None:
-        wandb.log(
-            {
-                "final_eval_loss": total_loss,
-                "final_eval_tokens": evaluated_on_tokens,
-                "eval_times": eval_time,
-                "perplexity": perplexity,
-            },
-            step=global_step,
-        )
-        logger.info(f"Final eval loss: {total_loss}")
+    if global_rank == 0:
+        print(
+            f"[step {global_step}] final_eval_loss: {total_loss:.4f}, final_eval_tokens: {evaluated_on_tokens}, eval_times: {eval_time:.2f}s, final_perplexity_val_set: {perplexity:.4f}")
+
+        # wandb.log(
+        #     {
+        #         "final_eval_loss": total_loss,
+        #         "final_eval_tokens": evaluated_on_tokens,
+        #         "eval_times": eval_time,
+        #         "perplexity": perplexity,
+        #     },
+        #     step=global_step,
+        # )
+        logger.info(f"Final perplexity: {perplexity}")
 
     # track evaluation stats
     df_eval_tmp = {
@@ -1035,7 +1029,6 @@ def main(args):
 
     logger.info("Script finished successfully")
     print(f"Rank {global_rank} finished successfully")
-    print("perplexity", perplexity)
 
 
 if __name__ == "__main__":
