@@ -179,6 +179,13 @@ def parse_args():
 
     args = parser.parse_args()
 
+    if args.save_dir is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        args.save_dir = os.path.join(script_dir, "ckpt")
+        logger.info(f"No save_dir specified, will use {args.save_dir}")
+
+    os.makedirs(args.save_dir, exist_ok=True)
+
     optimizer_desc = args.optimizer.lower()
     if args.optimizer.lower() == "loro_adamw":
         optimizer_desc += f"_{args.loro_type}"

@@ -1,0 +1,71 @@
+
+
+Experiment = loro_adamw_loro_freq_500_r_attn256_mlp256_all_init_lrk_xavier_rs_-1_rfsh_all_500_lr_0.01_gc0.0_cosine_restart_cyc500_wp5_adj-6000_2000_0.1
+
+
+2025-05-05 12:19:33.614 | INFO     | __main__:main:304 - Global rank 0, local rank 0, device: 0
+2025-05-05 12:19:33.615 | INFO     | __main__:main:310 - Process group initialized
+Rank 0 using device cuda:0
+
+
+# CUDA visible devices: 1
+
+
+2025-05-05 12:19:33.615 | INFO     | __main__:main:341 - Using dist with rank 0 (only rank 0 will log)
+2025-05-05 12:19:33.615 | INFO     | __main__:main:342 - ****************************************
+2025-05-05 12:19:33.615 | INFO     | __main__:main:343 - Starting training with the arguments
+2025-05-05 12:19:33.615 | INFO     | __main__:main:345 - c4_local                       False
+2025-05-05 12:19:33.615 | INFO     | __main__:main:345 - train_data_path                en/c4-train.*.json.gz
+2025-05-05 12:19:33.615 | INFO     | __main__:main:345 - val_data_path                  en/c4-validation.*.json.gz
+2025-05-05 12:19:33.615 | INFO     | __main__:main:345 - model_config                   configs/llama_60m.json
+2025-05-05 12:19:33.615 | INFO     | __main__:main:345 - use_hf_model                   False
+2025-05-05 12:19:33.615 | INFO     | __main__:main:345 - continue_from                  None
+2025-05-05 12:19:33.615 | INFO     | __main__:main:345 - batch_size                     16
+2025-05-05 12:19:33.615 | INFO     | __main__:main:345 - gradient_accumulation          2
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - total_batch_size               32
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - max_length                     256
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - optimizer                      loro_adamw
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - lr                             0.01
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - scheduler                      cosine_restart
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - cosine_restart_freq            500
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - cosine_restart_warmup          5
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - lr_jag_after_warmup            False
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - lr_adjust_steps                -6000
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - min_lr_ratio                   0.1
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - activation_checkpointing       False
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - weight_decay                   0.0
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - warmup_steps                   2000
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - eval_every                     300
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - num_training_steps             6
+2025-05-05 12:19:33.616 | INFO     | __main__:main:345 - max_train_tokens               None
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - save_every                     10000
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - save_ckpt                      False
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - save_dir                       /home/rtx3090/code_jiaxi/LORO-main/ckpt
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - tags                           None
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - dtype                          bfloat16
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - workers                        8
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - seed                           0
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - name                           test
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - grad_clipping                  0.0
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - beta1                          0.0
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - rank                           128
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - update_proj_gap                50
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - galore_scale                   1.0
+2025-05-05 12:19:33.617 | INFO     | __main__:main:345 - proj_type                      std
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_type                      loro
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_freq                      500
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_refresh                   all
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_refresh_freq              500
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_attn_rank                 256
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_mlp_rank                  256
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_init                      xavier
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_scope                     all
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_lr_scaler                 -1
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - loro_mlp_dense                 False
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - single_gpu                     False
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - desc                           loro_adamw_loro_freq_500_r_attn256_mlp256_all_init_lrk_xavier_rs_-1_rfsh_all_500_lr_0.01_gc0.0_cosine_restart_cyc500_wp5_adj-6000_2000_0.1
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - timestamp                      2025-05-05_12-19-33
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - log_path                       /home/rtx3090/code_jiaxi/LORO-main/ckpt/log_2025-05-05_12-19-33.txt
+2025-05-05 12:19:33.618 | INFO     | __main__:main:345 - num_cuda                       1
+2025-05-05 12:19:33.618 | INFO     | __main__:main:346 - ****************************************
+2025-05-05 12:19:40.557 | INFO     | __main__:main:362 - Shuffling data with seed 42
