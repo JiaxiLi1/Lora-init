@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ Finetuning a 🤗 Transformers model for sequence classification on GLUE."""
+import wandb
 import argparse
 import json
 import logging
@@ -392,20 +393,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-
-    if os.path.exists("wandb_api.py"):
-        import wandb
-        import wandb_api
-
-        wandb.login(key=wandb_api.KEY)
-        wandb.init(
-            project=f"LORO-GLUE-{args.task_name}-{args.model_name_or_path}",
-            name=args.desc,
-        )
-        wandb.config.update(dict(vars(args)), allow_val_change=True)
-    else:
-        wandb = None
-        Warning("wandb_api.py not found, skipping wandb logging")
+    runname = f"{time.strftime('%m%d_%H%M%S')}_loro_{args.model_name_or_path}_task_{args.task_name}_{args.optimizer}_bs_{args.per_device_train_batch_size}_ep_{args.num_train_epochs}"\
+              f"lr_{args.learning_rate}_weight_decay_{args.weight_decay}_rank_{args.loro_rank}_alpha_{args.loro_alpha}"
+    print(f"runname= {runname}")
+    wandb.init(
+        project=f"GLUE",
+        name=args.desc,
+    )
+    wandb.config.update(dict(vars(args)), allow_val_change=True)
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
@@ -713,28 +708,24 @@ def main():
     # Optimizer
 
     if args.optimizer.lower() == "adamw":
+        from roberta_lowrank_adapter import apply_lowrank_adapter, get_optimizer_param_groups
         # Split weights in two groups, one with weight decay and the other not.
-        no_decay = ["bias", "LayerNorm.weight"]
-        optimizer_grouped_parameters = [
-            {
-                "params": [
-                    p
-                    for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": args.weight_decay,
-            },
-            {
-                "params": [
-                    p
-                    for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 0.0,
-            },
-        ]
+        trainable_param_count = apply_lowrank_adapter(
+            model,
+            scope=args.loro_scope,
+            rank=args.loro_rank,
+            alpha=args.loro_alpha,
+            init=args.loro_init
+        )
+
+        optimizer_grouped_parameters = get_optimizer_param_groups(
+            model,
+            weight_decay=args.weight_decay,
+            lr=args.learning_rate
+        )
+
         optimizer = torch.optim.AdamW(
-            optimizer_grouped_parameters, lr=args.learning_rate
+            optimizer_grouped_parameters,
         )
 
     elif args.optimizer.lower() == "galore_adamw":
@@ -833,12 +824,12 @@ def main():
             assert (
                 p.requires_grad
             ), "All parameters should require gradients in accelerator."
-
-    # model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = (
-    #     accelerator.prepare(
-    #         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+    # if not args.optimizer.lower() == "loro_adamw":
+    #     model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = (
+    #         accelerator.prepare(
+    #             model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+    #         )
     #     )
-    # )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
     num_update_steps_per_epoch = math.ceil(
@@ -883,14 +874,22 @@ def main():
     eval_start_time = time.time()
 
     if args.task_name is not None:
-        metric = evaluate.load("glue", args.task_name)
+        metric = evaluate.load("hf_glue/glue.py", config_name=args.task_name)
     else:
         metric = evaluate.load("accuracy")
+
+    # if args.optimizer.lower() == "loro_adamw":
+    #     model = model.to(accelerator.device)
+    model = model.to(accelerator.device)
 
     model.eval()
     samples_seen = 0
     eval_loss = 0
     for step, batch in enumerate(eval_dataloader):
+        # if args.optimizer.lower() == "loro_adamw":
+        #     batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+        batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+
         with torch.no_grad():
             outputs = model(**batch)
             eval_loss += outputs.loss
@@ -900,6 +899,13 @@ def main():
             else outputs.logits.squeeze()
         )
         predictions, references = accelerator.gather((predictions, batch["labels"]))
+        # if args.optimizer.lower() == "loro_adamw":
+        #     predictions = predictions.to(accelerator.device)
+        #     references = batch["labels"].to(accelerator.device)
+        #
+        #     predictions, references = accelerator.gather((predictions, references))
+        # else:
+        #     predictions, references = accelerator.gather((predictions, batch["labels"]))
         # If we are in a multiprocess environment, the last batch has duplicates
         if accelerator.num_processes > 1:
             if step == len(eval_dataloader) - 1:
@@ -987,6 +993,9 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
+    model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"model trainable parameters: {model_params:,} ({model_params / 1e6:.2f}M)")
+
     for epoch in range(starting_epoch, args.num_train_epochs):
         model.train()
         if args.with_tracking:
@@ -1003,6 +1012,9 @@ def main():
         else:
             active_dataloader = train_dataloader
         for step, batch in enumerate(active_dataloader):
+            # if args.optimizer.lower() == "loro_adamw":
+            #     batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+            batch = {k: v.to(accelerator.device) for k, v in batch.items()}
 
             outputs = model(**batch)
             loss = outputs.loss
@@ -1083,7 +1095,7 @@ def main():
         # Refresh the metric function
         eval_start_time = time.time()
         if args.task_name is not None:
-            metric = evaluate.load("glue", args.task_name)
+            metric = evaluate.load("hf_glue/glue.py", config_name=args.task_name)
         else:
             metric = evaluate.load("accuracy")
 
@@ -1091,6 +1103,10 @@ def main():
         samples_seen = 0
         eval_loss = 0
         for step, batch in enumerate(eval_dataloader):
+            # if args.optimizer.lower() == "loro_adamw":
+            #     batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+            batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+
             with torch.no_grad():
                 outputs = model(**batch)
                 eval_loss += outputs.loss
@@ -1213,6 +1229,10 @@ def main():
 
         model.eval()
         for step, batch in enumerate(eval_dataloader):
+            # if args.optimizer.lower() == "loro_adamw":
+            #     batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+            batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+
             outputs = model(**batch)
             predictions = outputs.logits.argmax(dim=-1)
             metric.add_batch(
