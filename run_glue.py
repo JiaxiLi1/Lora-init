@@ -398,7 +398,7 @@ def main():
     print(f"runname= {runname}")
     wandb.init(
         project=f"GLUE",
-        name=args.desc,
+        name=runname,
     )
     wandb.config.update(dict(vars(args)), allow_val_change=True)
 
@@ -951,7 +951,8 @@ def main():
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(
-        range(args.max_train_steps), disable=not accelerator.is_local_main_process
+        range(args.max_train_steps), disable=not accelerator.is_local_main_process,
+        miniters=100
     )
     completed_steps = 0
     start_time = time.time()
@@ -1056,7 +1057,8 @@ def main():
                 if args.optimizer.lower() == "loro_adamw":
                     verbose_str += f" | exact LORO {args.loro_type}: {use_exact_loro} | grad_norm: {grad_norm:.4f}"
 
-                progress_bar.set_description_str(verbose_str)
+                if completed_steps % 100 == 0:
+                    progress_bar.set_description_str(verbose_str)
                 completed_steps += 1
 
                 # updata train stats
