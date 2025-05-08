@@ -95,7 +95,7 @@ def parse_args():
         "You can use M and B suffixes, e.g. 100M or 1B.",
     )
     parser.add_argument("--save_every", type=int, default=10_000)
-    parser.add_argument("--save_ckpt", default=False, action="store_true")
+    parser.add_argument("--save_ckpt", type=str_to_bool, default=False)
     parser.add_argument("--save_dir", type=str, default=None)
     parser.add_argument("--tags", type=str, default=None)
     parser.add_argument(
