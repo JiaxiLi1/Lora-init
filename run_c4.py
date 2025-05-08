@@ -287,6 +287,46 @@ def evaluate_model(
     return total_loss, evaluated_on_tokens, eval_time, perplexity
 
 
+def measure_inference_speed(model, dataloader, tokenizer, device, num_batches=100):
+    model.eval()  # 设置为评估模式
+
+    # 预热几个批次
+    with torch.no_grad():
+        for i, batch in enumerate(dataloader):
+            if i >= 3:  # 预热3个批次
+                break
+            batch = {k: v.to(device) for k, v in batch.items()}
+            _ = model(**batch)
+
+    # 开始测量
+    total_tokens = 0
+    start_time = time.time()
+
+    with torch.no_grad():
+        for i, batch in enumerate(dataloader):
+            if i >= num_batches:
+                break
+
+            batch = {k: v.to(device) for k, v in batch.items()}
+            _ = model(**batch)
+
+            # 计算此批次中的令牌数量
+            tokens_in_batch = (batch["input_ids"] != tokenizer.pad_token_id).sum().item()
+            total_tokens += tokens_in_batch
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+
+    # 计算每秒处理的令牌数
+    tokens_per_second = total_tokens / elapsed_time
+
+    return {
+        "tokens_per_second": tokens_per_second,
+        "total_tokens": total_tokens,
+        "elapsed_time": elapsed_time,
+        "batches_processed": num_batches
+    }
+
 def main(args):
     Warning(f"\nSave_ckpt = {args.save_ckpt}, Save_dir = {args.save_dir}.\n")
 
@@ -743,6 +783,18 @@ def main(args):
 
     df_train_all = pd.DataFrame([])
     df_eval_all = pd.DataFrame([])
+
+    if global_rank == 0:  # 只在主进程上运行
+        logger.info("测量初始推理速度...")
+        inference_stats = measure_inference_speed(model, dataloader, tokenizer, device)
+        logger.info(f"初始推理速度: {inference_stats['tokens_per_second']:.2f} 令牌/秒")
+
+        # 记录到wandb
+        wandb.log({
+            "initial_inference_speed": inference_stats['tokens_per_second'],
+            "initial_inference_batches": inference_stats['batches_processed'],
+            "initial_inference_tokens": inference_stats['total_tokens']
+        }, step=0)
 
     for batch_idx, batch in enumerate(dataloader):
 

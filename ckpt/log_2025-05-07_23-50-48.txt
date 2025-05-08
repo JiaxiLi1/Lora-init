@@ -1,0 +1,279 @@
+
+
+Experiment = loro_adamw_loro_freq_5_r_attn256_mlp256_all_init_lrk_xavier_rs_-1_rfsh_all_5_lr_0.01_gc0.0_cosine_restart_cyc500_wp5_adj-6000_2000_0.1
+
+
+2025-05-07 23:50:48.119 | INFO     | __main__:main:344 - Global rank 0, local rank 0, device: 0
+2025-05-07 23:50:48.120 | INFO     | __main__:main:350 - Process group initialized
+Rank 0 using device cuda:0
+
+
+# CUDA visible devices: 1
+
+
+2025-05-07 23:50:48.120 | INFO     | __main__:main:381 - Using dist with rank 0 (only rank 0 will log)
+2025-05-07 23:50:48.120 | INFO     | __main__:main:382 - ****************************************
+2025-05-07 23:50:48.120 | INFO     | __main__:main:383 - Starting training with the arguments
+2025-05-07 23:50:48.120 | INFO     | __main__:main:385 - c4_local                       False
+2025-05-07 23:50:48.120 | INFO     | __main__:main:385 - train_data_path                en/c4-train.*.json.gz
+2025-05-07 23:50:48.120 | INFO     | __main__:main:385 - val_data_path                  en/c4-validation.*.json.gz
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - model_config                   configs/llama_350m.json
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - use_hf_model                   False
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - continue_from                  None
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - batch_size                     16
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - gradient_accumulation          32
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - total_batch_size               512
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - max_length                     256
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - optimizer                      loro_adamw
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - lr                             0.01
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - scheduler                      cosine_restart
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - cosine_restart_freq            500
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - cosine_restart_warmup          5
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - lr_jag_after_warmup            False
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - lr_adjust_steps                -6000
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - min_lr_ratio                   0.1
+2025-05-07 23:50:48.121 | INFO     | __main__:main:385 - activation_checkpointing       False
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - weight_decay                   0.0
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - warmup_steps                   2000
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - eval_every                     3000
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - num_training_steps             10000
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - max_train_tokens               None
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - save_every                     10000
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - save_ckpt                      False
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - save_dir                       /home/rtx3090/code_jiaxi/LORO-main/ckpt
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - tags                           None
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - dtype                          bfloat16
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - workers                        8
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - seed                           0
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - name                           test
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - grad_clipping                  0.0
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - beta1                          0.0
+2025-05-07 23:50:48.122 | INFO     | __main__:main:385 - rank                           128
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - update_proj_gap                50
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - galore_scale                   1.0
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - proj_type                      std
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_type                      loro
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_freq                      5
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_refresh                   all
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_refresh_freq              5
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_attn_rank                 256
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_mlp_rank                  256
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_init                      xavier
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_scope                     all
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_lr_scaler                 -1
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - loro_mlp_dense                 False
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - single_gpu                     False
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - desc                           loro_adamw_loro_freq_5_r_attn256_mlp256_all_init_lrk_xavier_rs_-1_rfsh_all_5_lr_0.01_gc0.0_cosine_restart_cyc500_wp5_adj-6000_2000_0.1
+2025-05-07 23:50:48.123 | INFO     | __main__:main:385 - timestamp                      2025-05-07_23-50-48
+2025-05-07 23:50:48.124 | INFO     | __main__:main:385 - log_path                       /home/rtx3090/code_jiaxi/LORO-main/ckpt/log_2025-05-07_23-50-48.txt
+2025-05-07 23:50:48.124 | INFO     | __main__:main:385 - num_cuda                       1
+2025-05-07 23:50:48.124 | INFO     | __main__:main:386 - ****************************************
+2025-05-07 23:50:55.116 | INFO     | __main__:main:402 - Shuffling data with seed 42
+layer.0.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.0.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.0.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.0.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.0.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.0.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.0.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.1.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.1.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.1.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.1.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.1.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.1.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.1.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.2.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.2.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.2.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.2.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.2.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.2.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.2.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.3.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.3.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.3.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.3.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.3.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.3.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.3.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.4.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.4.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.4.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.4.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.4.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.4.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.4.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.5.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.5.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.5.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.5.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.5.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.5.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.5.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.6.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.6.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.6.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.6.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.6.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.6.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.6.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.7.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.7.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.7.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.7.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.7.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.7.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.7.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.8.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.8.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.8.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.8.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.8.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.8.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.8.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.9.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.9.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.9.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.9.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.9.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.9.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.9.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.10.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.10.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.10.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.10.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.10.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.10.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.10.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.11.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.11.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.11.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.11.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.11.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.11.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.11.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.12.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.12.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.12.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.12.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.12.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.12.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.12.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.13.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.13.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.13.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.13.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.13.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.13.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.13.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.14.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.14.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.14.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.14.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.14.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.14.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.14.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.15.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.15.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.15.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.15.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.15.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.15.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.15.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.16.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.16.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.16.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.16.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.16.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.16.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.16.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.17.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.17.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.17.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.17.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.17.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.17.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.17.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.18.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.18.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.18.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.18.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.18.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.18.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.18.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.19.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.19.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.19.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.19.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.19.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.19.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.19.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.20.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.20.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.20.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.20.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.20.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.20.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.20.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.21.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.21.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.21.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.21.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.21.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.21.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.21.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.22.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.22.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.22.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.22.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.22.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.22.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.22.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.23.self_attn.q_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.23.self_attn.k_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.23.self_attn.v_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.23.self_attn.o_proj: Linear(in_features=1024, out_features=1024, bias=False) --> LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+layer.23.mlp.gate_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+layer.23.mlp.down_proj: Linear(in_features=2736, out_features=1024, bias=False) --> LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+layer.23.mlp.up_proj: Linear(in_features=1024, out_features=2736, bias=False) --> LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+
+LowRankLinear modules are set successfully!
+Self-attention rank: 256, MLP rank: 256.
+Full param: 367.96928 M = 0.36796928 G
+Low-rank param: 185.222144 M = 0.185222144 G
+Cprs rate: 50.33631%
+
+2025-05-07 23:51:10.116 | INFO     | __main__:main:692 - 
+LlamaForCausalLM(
+  (model): LlamaModel(
+    (embed_tokens): Embedding(32000, 1024, padding_idx=31999)
+    (layers): ModuleList(
+      (0-23): 24 x LlamaDecoderLayer(
+        (self_attn): LlamaAttention(
+          (q_proj): LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+          (k_proj): LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+          (v_proj): LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+          (o_proj): LowRankLinear(in_dim=1024, out_dim=1024, rank=256, init=xavier)
+          (rotary_emb): LlamaRotaryEmbedding()
+        )
+        (mlp): LlamaMLP(
+          (gate_proj): LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+          (down_proj): LowRankLinear(in_dim=2736, out_dim=1024, rank=256, init=xavier)
+          (up_proj): LowRankLinear(in_dim=1024, out_dim=2736, rank=256, init=xavier)
+          (act_fn): SiLUActivation()
+        )
+        (input_layernorm): LlamaRMSNorm()
+        (post_attention_layernorm): LlamaRMSNorm()
+      )
+    )
+    (norm): LlamaRMSNorm()
+  )
+  (lm_head): Linear(in_features=1024, out_features=32000, bias=False)
+)
+
+2025-05-07 23:51:10.117 | INFO     | __main__:main:693 - Total params: 185.22M
+2025-05-07 23:51:10.118 | INFO     | __main__:main:696 - Trainable params: 185.22M
+2025-05-07 23:51:10.118 | INFO     | __main__:main:699 - Saving model to /home/rtx3090/code_jiaxi/LORO-main/ckpt every 10000 update steps
+2025-05-07 23:51:10.269 | INFO     | __main__:main:788 - 测量初始推理速度...
+2025-05-07 23:51:23.721 | INFO     | __main__:main:790 - 初始推理速度: 36871.18 令牌/秒
