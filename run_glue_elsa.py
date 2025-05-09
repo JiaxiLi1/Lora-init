@@ -414,7 +414,7 @@ def parse_args():
 def main():
     args = parse_args()
     runname = f"{time.strftime('%m%d_%H%M%S')}_loro_{args.model_name_or_path}_task_{args.task_name}_{args.optimizer}_bs_{args.per_device_train_batch_size}_ep_{args.num_train_epochs}"\
-              f"lr_{args.learning_rate}_weight_decay_{args.weight_decay}_rank_{args.loro_rank}_alpha_{args.loro_alpha}"
+              f"lorarank_{args.lora_rank}_sp_{args.sparsity}_lr_{args.learning_rate}_weight_decay_{args.weight_decay}_rank_{args.loro_rank}_alpha_{args.loro_alpha}"
     print(f"runname= {runname}")
     wandb.init(
         project=f"GLUE",
