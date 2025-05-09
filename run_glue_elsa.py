@@ -774,6 +774,33 @@ def main():
 
         # 创建AdamW优化器
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters)
+    elif args.optimizer.lower() == "sparse_adam":
+        from hybrid_lowrank_sparse_adapter import apply_hybrid_adapter, get_optimizer_param_groups
+
+        # 应用混合低秩+稀疏适配器
+        trainable_param_count = apply_hybrid_adapter(
+            model=model,
+            scope=args.adapter_scope,
+            rank=args.lora_rank,
+            sparsity=args.sparsity,
+            gamma=args.gamma,
+            sparse_method=args.sparse_method,
+            sparse_svd_rank=args.sparse_svd_rank,
+            alpha=args.lora_alpha,
+            cola_silu=args.cola_silu,
+            cola_init=args.cola_init,
+            svd_inverse=args.svd_inverse
+        )
+
+        # 获取具有不同学习率的参数组
+        optimizer_grouped_parameters = get_optimizer_param_groups(
+            model,
+            weight_decay=args.weight_decay,
+            lr=args.learning_rate
+        )
+
+        # 创建AdamW优化器
+        optimizer = torch.optim.Adam(optimizer_grouped_parameters)
 
     elif args.optimizer.lower() == "galore_adamw":
         from torch import nn
