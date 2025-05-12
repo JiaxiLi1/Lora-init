@@ -7,6 +7,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import wandb
+import datetime
 
 import torch
 import torch.nn as nn
@@ -345,7 +346,13 @@ def main(args):
         f"Global rank {global_rank}, local rank {local_rank}, device: {torch.cuda.current_device()}"
     )
 
-    dist.init_process_group(backend="nccl", rank=global_rank, world_size=world_size)
+    # dist.init_process_group(backend="nccl", rank=global_rank, world_size=world_size)
+    dist.init_process_group(
+        backend="nccl",
+        rank=global_rank,
+        world_size=world_size,
+        timeout=datetime.timedelta(seconds=7200)  # 延长超时时间为2小时
+    )
 
     logger.info("Process group initialized")
     device = f"cuda:{local_rank}"
