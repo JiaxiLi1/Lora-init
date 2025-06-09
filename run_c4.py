@@ -174,6 +174,20 @@ def parse_args():
         action="store_true",
         default=False,
     )
+    
+    # 2:4 Sparse training parameters
+    parser.add_argument(
+        "--enable_2to4_sparse",
+        action="store_true",
+        default=False,
+        help="Enable 2:4 sparse training on low-rank matrices"
+    )
+    parser.add_argument(
+        "--sparse_init_scale",
+        type=float,
+        default=1.0,
+        help="Initial scale for sparse weights"
+    )
 
     # disable ddp, single_gpu
     parser.add_argument("--single_gpu", default=False, action="store_true")
@@ -196,6 +210,8 @@ def parse_args():
             optimizer_desc += f"_r_attn{args.loro_attn_rank}_mlp{args.loro_mlp_rank}_{args.loro_scope}"
             optimizer_desc += f"_init_lrk_{args.loro_init}"
             optimizer_desc += f"_rs_{args.loro_lr_scaler}"
+            if args.enable_2to4_sparse:
+                optimizer_desc += f"_sparse2to4"
         else:
             args.loro_type = "eucl"
             optimizer_desc += f"_fullrank"
@@ -662,7 +678,16 @@ def main(args):
 
     ## NOTE: LORO optimizer
     if args.optimizer.lower() == "loro_adamw":
-        from loro_torch.lowrank_module import apply_lowrank_param, get_lowrank_param
+        if args.enable_2to4_sparse:
+            # Use sparse low-rank implementation
+            from loro_torch.sparse_lowrank_module import apply_sparse_lowrank_param, get_sparse_lowrank_param
+            apply_fn = apply_sparse_lowrank_param
+            get_param_fn = get_sparse_lowrank_param
+        else:
+            # Use standard LORO implementation
+            from loro_torch.lowrank_module import apply_lowrank_param, get_lowrank_param
+            apply_fn = apply_lowrank_param
+            get_param_fn = get_lowrank_param
 
         # apply lowrank parameterization
         if args.loro_scope is not None:
@@ -671,19 +696,38 @@ def main(args):
                     args.loro_scope == "attn" and args.loro_mlp_rank == mlp_rank
                 ), "Only support dense MLP for attn"
 
-            apply_lowrank_param(
-                model,
-                model_config,
-                model_type="llama",
-                scope=args.loro_scope,
-                attn_rank=args.loro_attn_rank,
-                mlp_rank=args.loro_mlp_rank,
-                init=args.loro_init,
-            )
+            if args.enable_2to4_sparse:
+                apply_fn(
+                    model,
+                    model_config,
+                    model_type="llama",
+                    scope=args.loro_scope,
+                    attn_rank=args.loro_attn_rank,
+                    mlp_rank=args.loro_mlp_rank,
+                    init=args.loro_init,
+                    enable_sparse=True,
+                    sparse_init_scale=args.sparse_init_scale,
+                )
+            else:
+                apply_fn(
+                    model,
+                    model_config,
+                    model_type="llama",
+                    scope=args.loro_scope,
+                    attn_rank=args.loro_attn_rank,
+                    mlp_rank=args.loro_mlp_rank,
+                    init=args.loro_init,
+                )
         else:
             Warning(f"\nUsing full-rank model ...\n")
 
-        param_groups = get_lowrank_param(model, model_config, args.loro_lr_scaler)
+        param_groups = get_param_fn(model, model_config, args.loro_lr_scaler)
+        
+        # Set learning rates for sparse scale parameters
+        if args.enable_2to4_sparse:
+            for group in param_groups:
+                if group.get("type") == "sparse_scale":
+                    group["lr"] = args.lr * 0.1  # Smaller learning rate for scale parameters
 
         optimizer = LOROAdamW(
             param_groups,
@@ -791,17 +835,17 @@ def main(args):
     df_train_all = pd.DataFrame([])
     df_eval_all = pd.DataFrame([])
 
-    if global_rank == 0:  # 只在主进程上运行
-        logger.info("测量初始推理速度...")
-        inference_stats = measure_inference_speed(model, dataloader, tokenizer, device)
-        logger.info(f"初始推理速度: {inference_stats['tokens_per_second']:.2f} 令牌/秒")
-
-        # 记录到wandb
-        wandb.log({
-            "initial_inference_speed": inference_stats['tokens_per_second'],
-            "initial_inference_batches": inference_stats['batches_processed'],
-            "initial_inference_tokens": inference_stats['total_tokens']
-        }, step=0)
+    # if global_rank == 0:  # 只在主进程上运行
+    #     logger.info("测量初始推理速度...")
+    #     inference_stats = measure_inference_speed(model, dataloader, tokenizer, device)
+    #     logger.info(f"初始推理速度: {inference_stats['tokens_per_second']:.2f} 令牌/秒")
+    #
+    #     # 记录到wandb
+    #     wandb.log({
+    #         "initial_inference_speed": inference_stats['tokens_per_second'],
+    #         "initial_inference_batches": inference_stats['batches_processed'],
+    #         "initial_inference_tokens": inference_stats['total_tokens']
+    #     }, step=0)
 
     for batch_idx, batch in enumerate(dataloader):
 

@@ -1,0 +1,161 @@
+# LORO + 2:4 Sparse Training Docker Environment
+# ===============================================
+# Based on working 2by4-pretrain-acc-examples/Dockerfile
+# Only adds LORO-specific dependencies
+
+# Use NVIDIA CUDA devel image with newer Ubuntu to fix GLIBC issues
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies including compilation tools
+RUN apt-get update && apt-get install -y \
+    wget \
+    bzip2 \
+    ca-certificates \
+    git \
+    vim \
+    curl \
+    build-essential \
+    cmake \
+    ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Miniconda
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+    /bin/bash ~/miniconda.sh -b -p /opt/conda && \
+    rm ~/miniconda.sh && \
+    /opt/conda/bin/conda clean -a -y && \
+    ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
+    echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc && \
+    echo "conda activate loro_2by4" >> ~/.bashrc
+
+# Add conda to path
+ENV PATH=/opt/conda/bin:$PATH
+
+# Create the loro_2by4 environment with Python 3.8 (renamed from 2by4)
+RUN conda create -n loro_2by4 python=3.8 -y
+
+# Activate the environment for subsequent commands
+SHELL ["/bin/bash", "--login", "-c"]
+
+# Install PyTorch with CUDA support
+RUN conda activate loro_2by4 && \
+    conda install pytorch=2.1.0 pytorch-cuda=12.1 torchvision torchaudio -c pytorch -c nvidia -y
+
+# Install Triton
+RUN conda activate loro_2by4 && \
+    pip install triton==2.3.0
+
+# Install base Python dependencies (same as original 2by4)
+RUN conda activate loro_2by4 && \
+    pip install \
+    numpy==1.24.4 \
+    datasets==2.17.0 \
+    tokenizers==0.7.0 \
+    tiktoken==0.7.0 \
+    wandb==0.20.0 \
+    tqdm==4.67.1 \
+    pandas==2.0.3 \
+    pyyaml==6.0.2 \
+    regex==2024.11.6 \
+    requests==2.32.3 \
+    sentencepiece==0.2.0 \
+    sacremoses==0.1.1 \
+    psutil==7.0.0 \
+    packaging==25.0 \
+    protobuf==5.29.5 \
+    setuptools==75.3.0
+
+# ========================================
+# LORO-specific additions start here
+# ========================================
+
+# Upgrade transformers and add LORO-specific packages (match local working environment exactly)
+RUN conda activate loro_2by4 && \
+    pip install --upgrade \
+    transformers==4.46.3 \
+    accelerate==1.0.1 \
+    loguru==0.7.3 \
+    einops==0.8.0 \
+    tensorly==0.8.1 \
+    nvitop==1.4.1 \
+    lion-pytorch==0.2.2 \
+    evaluate==0.4.3 \
+    bitsandbytes==0.45.0
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy the project files (this should be called from parent directory of both projects)
+COPY 2by4-pretrain-acc-examples /workspace/2by4-pretrain-acc-examples/
+COPY LORO-main /workspace/LORO-main/
+
+# Install the sparse package (rebuild to avoid GLIBC issues)
+RUN conda activate loro_2by4 && \
+    cd /workspace/2by4-pretrain-acc-examples/sparse_package && \
+    rm -rf build/ *.egg-info/ && \
+    rm -f sparse/*.so && \
+    pip install -e .
+
+# Set PYTHONPATH to include both projects
+ENV PYTHONPATH="/workspace:/workspace/2by4-pretrain-acc-examples:/workspace/LORO-main:${PYTHONPATH}"
+
+# Create verification and training scripts
+RUN echo '#!/bin/bash' > /workspace/verify_loro_2by4.py && \
+    echo 'import sys' >> /workspace/verify_loro_2by4.py && \
+    echo 'sys.path.insert(0, "/workspace/2by4-pretrain-acc-examples")' >> /workspace/verify_loro_2by4.py && \
+    echo 'sys.path.insert(0, "/workspace/LORO-main")' >> /workspace/verify_loro_2by4.py && \
+    echo 'from loro_torch.sparse_lowrank_module import test_installation' >> /workspace/verify_loro_2by4.py && \
+    echo 'if __name__ == "__main__":' >> /workspace/verify_loro_2by4.py && \
+    echo '    print("🔍 Verifying LORO + 2:4 integration...")' >> /workspace/verify_loro_2by4.py && \
+    echo '    success = test_installation()' >> /workspace/verify_loro_2by4.py && \
+    echo '    if success:' >> /workspace/verify_loro_2by4.py && \
+    echo '        print("✅ LORO + 2:4 Sparse environment ready!")' >> /workspace/verify_loro_2by4.py && \
+    echo '    else:' >> /workspace/verify_loro_2by4.py && \
+    echo '        print("❌ Verification failed")' >> /workspace/verify_loro_2by4.py && \
+    echo '        sys.exit(1)' >> /workspace/verify_loro_2by4.py && \
+    chmod +x /workspace/verify_loro_2by4.py
+
+# Create training script
+RUN echo '#!/bin/bash' > /workspace/run_loro_training.sh && \
+    echo 'cd /workspace/LORO-main' >> /workspace/run_loro_training.sh && \
+    echo 'conda activate loro_2by4' >> /workspace/run_loro_training.sh && \
+    echo 'echo "🚀 Starting LORO + 2:4 sparse training..."' >> /workspace/run_loro_training.sh && \
+    echo 'torchrun --nproc_per_node 1 --master_port 29500 run_c4.py \\' >> /workspace/run_loro_training.sh && \
+    echo '  --model_config configs/llama_130m.json \\' >> /workspace/run_loro_training.sh && \
+    echo '  --dtype bfloat16 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --batch_size 2 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --total_batch_size 256 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --num_training_steps 1000 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --save_every 500 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --eval_every 100 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --lr 0.01 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --scheduler cosine_restart \\' >> /workspace/run_loro_training.sh && \
+    echo '  --warmup_steps 50 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --weight_decay 0.1 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --optimizer loro_adamw \\' >> /workspace/run_loro_training.sh && \
+    echo '  --loro_refresh all \\' >> /workspace/run_loro_training.sh && \
+    echo '  --loro_refresh_freq 200 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --loro_scope all \\' >> /workspace/run_loro_training.sh && \
+    echo '  --loro_init xavier \\' >> /workspace/run_loro_training.sh && \
+    echo '  --loro_attn_rank 64 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --loro_mlp_rank 64 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --loro_type loro \\' >> /workspace/run_loro_training.sh && \
+    echo '  --loro_freq 50 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --loro_lr_scaler -1 \\' >> /workspace/run_loro_training.sh && \
+    echo '  --c4_local False \\' >> /workspace/run_loro_training.sh && \
+    echo '  --enable_2to4_sparse \\' >> /workspace/run_loro_training.sh && \
+    echo '  --sparse_init_scale 1.0' >> /workspace/run_loro_training.sh && \
+    chmod +x /workspace/run_loro_training.sh
+
+# Make sure conda environment is activated by default
+RUN echo "conda activate loro_2by4" >> ~/.bashrc
+
+# Set the default command to verification + interactive bash
+CMD ["/bin/bash", "-c", "source /opt/conda/etc/profile.d/conda.sh && conda activate loro_2by4 && python /workspace/verify_loro_2by4.py && echo '🚀 Environment ready! Use ./run_loro_training.sh to start training.' && exec /bin/bash"] 

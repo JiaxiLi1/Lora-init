@@ -11,6 +11,10 @@ from transformers.utils.versions import require_version
 
 from loro_torch.lowrank_module import LowRankLinear
 from loro_torch.lowrank_adpt_module import LowRankAdapterLinear
+try:
+    from loro_torch.sparse_lowrank_module import SparseLowRankLinear
+except ImportError:
+    SparseLowRankLinear = None
 
 
 def get_loro_update_fn(type):
@@ -183,7 +187,7 @@ class LOROAdamW(Optimizer):
         to_refresh = {
             "reg": ["regular"],
             "lrk": ["lowrank_in", "lowrank_out"],
-            "all": ["lowrank_in", "lowrank_out", "regular"],
+            "all": ["lowrank_in", "lowrank_out", "regular", "sparse_scale"],
         }
 
         for group in self.param_groups:
@@ -303,7 +307,11 @@ class LOROAdamW(Optimizer):
 
     def _loro_step(self, use_exact_loro):
         for module in self.model.modules():
-            if isinstance(module, (LowRankLinear, LowRankAdapterLinear)):
+            module_types = (LowRankLinear, LowRankAdapterLinear)
+            if SparseLowRankLinear is not None:
+                module_types = module_types + (SparseLowRankLinear,)
+            
+            if isinstance(module, module_types):
                 M, N = self.loro_update_fn(
                     optimizer=self,
                     M=module.weight_out,
@@ -329,6 +337,9 @@ class LOROAdamW(Optimizer):
                 self._regular_step(group)
             elif group["type"] in ["lowrank_in", "lowrank_out"]:
                 self._calc_lowrank_grad(group)
+            elif group["type"] == "sparse_scale":
+                # Handle sparse scale parameters with smaller learning rate
+                self._regular_step(group)
             else:
                 raise ValueError(f"Invalid parameter group type: {group['type']}")
 

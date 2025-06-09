@@ -1,0 +1,14 @@
+## sparse
+*/**/__pycache__
+
+# PyCharm files
+.idea
+
+# build, distribute, and bins (+ python proto bindings)
+build/
+
+# setup.py intermediates
+sparse.egg-info
+
+# Compiled Dynamic libraries
+*.so

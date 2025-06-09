@@ -1,0 +1,112 @@
+# LORO + 2:4 Sparse Training Docker Environment (Minimal & Optimized)
+# ===============================================================================
+# 精简版：仅复制必要代码，排除训练数据和checkpoint
+
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    bzip2 \
+    ca-certificates \
+    git \
+    vim \
+    curl \
+    build-essential \
+    cmake \
+    ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Miniconda
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+    /bin/bash ~/miniconda.sh -b -p /opt/conda && \
+    rm ~/miniconda.sh && \
+    /opt/conda/bin/conda clean -a -y && \
+    ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
+    echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc && \
+    echo "conda activate loro_2by4" >> ~/.bashrc
+
+# Add conda to path
+ENV PATH=/opt/conda/bin:$PATH
+
+# Create the loro_2by4 environment with Python 3.8
+RUN conda create -n loro_2by4 python=3.8 -y
+
+# Activate the environment for subsequent commands
+SHELL ["/bin/bash", "--login", "-c"]
+
+# Install PyTorch with CUDA support
+RUN conda activate loro_2by4 && \
+    conda install pytorch=2.1.0 pytorch-cuda=12.1 torchvision torchaudio -c pytorch -c nvidia -y
+
+# Install Triton
+RUN conda activate loro_2by4 && \
+    pip install triton==2.3.0
+
+# Install base dependencies
+RUN conda activate loro_2by4 && \
+    pip install \
+    numpy==1.24.4 \
+    datasets==2.17.0 \
+    tokenizers==0.7.0 \
+    tiktoken==0.7.0 \
+    wandb==0.20.0 \
+    tqdm==4.67.1 \
+    pandas==2.0.3 \
+    pyyaml==6.0.2 \
+    regex==2024.11.6 \
+    requests==2.32.3 \
+    sentencepiece==0.2.0 \
+    sacremoses==0.1.1 \
+    psutil==7.0.0 \
+    packaging==25.0 \
+    protobuf==5.29.5 \
+    setuptools==75.3.0
+
+# Install LORO-specific dependencies (exact versions from working environment)
+RUN conda activate loro_2by4 && \
+    pip install \
+    transformers==4.46.3 \
+    accelerate==1.0.1 \
+    loguru==0.7.3 \
+    einops==0.8.0 \
+    tensorly==0.8.1 \
+    nvitop==1.4.1 \
+    lion-pytorch==0.2.2 \
+    evaluate==0.4.3 \
+    bitsandbytes==0.45.0
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy ONLY the sparse package source code (not data/checkpoints)
+COPY 2by4-pretrain-acc-examples/sparse_package /workspace/sparse_package/
+COPY 2by4-pretrain-acc-examples/setup.py /workspace/setup.py
+
+# Install the sparse package (rebuild to avoid GLIBC issues)
+RUN conda activate loro_2by4 && \
+    cd /workspace/sparse_package && \
+    rm -rf build/ *.egg-info/ && \
+    rm -f sparse/*.so && \
+    pip install -e .
+
+# Copy ONLY necessary LORO files (exclude data/checkpoints)
+COPY LORO-main/configs /workspace/LORO-main/configs/
+COPY LORO-main/run_c4.py /workspace/LORO-main/run_c4.py
+COPY LORO-main/loro_torch /workspace/LORO-main/loro_torch/
+COPY LORO-main/peft_pretraining /workspace/LORO-main/peft_pretraining/
+COPY LORO-main/setup.py /workspace/LORO-main/setup.py
+COPY LORO-main/README.md /workspace/LORO-main/README.md
+
+# Set PYTHONPATH
+ENV PYTHONPATH="/workspace:/workspace/LORO-main:/workspace/sparse_package:${PYTHONPATH}"
+
+# Default command
+CMD ["/bin/bash"] 

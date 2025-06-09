@@ -1,0 +1,95 @@
+FROM nvidia/cuda:12.1.1-devel-ubuntu20.04
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    bzip2 \
+    ca-certificates \
+    git \
+    vim \
+    curl \
+    build-essential \
+    cmake \
+    ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Miniconda
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
+    /bin/bash ~/miniconda.sh -b -p /opt/conda && \
+    rm ~/miniconda.sh && \
+    /opt/conda/bin/conda clean -a -y
+
+# Add conda to path
+ENV PATH=/opt/conda/bin:$PATH
+
+# Create environment with Python 3.8
+RUN conda create -n loro_sparse python=3.8 -y
+
+# Set the environment to be activated by default
+ENV CONDA_DEFAULT_ENV=loro_sparse
+ENV CONDA_PREFIX=/opt/conda/envs/loro_sparse
+ENV PATH=/opt/conda/envs/loro_sparse/bin:$PATH
+
+# Install PyTorch and Triton
+RUN /opt/conda/envs/loro_sparse/bin/pip install \
+    torch==2.1.0+cu121 \
+    torchvision==0.16.0+cu121 \
+    torchaudio==2.1.0+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+RUN /opt/conda/envs/loro_sparse/bin/pip install triton==2.3.0
+
+# Install other dependencies
+RUN /opt/conda/envs/loro_sparse/bin/pip install \
+    transformers==4.31.0 \
+    tokenizers==0.13.3 \
+    datasets==2.20.0 \
+    huggingface_hub==0.28.0 \
+    evaluate==0.4.2 \
+    numpy==1.24.4 \
+    pandas==2.0.0 \
+    scipy==1.10.0 \
+    scikit-learn==1.3.0 \
+    matplotlib==3.7.0 \
+    bitsandbytes==0.43.1 \
+    wandb==0.17.3 \
+    loguru==0.7.2 \
+    tensorly==0.8.1 \
+    nvitop==1.3.2 \
+    lion-pytorch==0.2.2 \
+    accelerate==0.33.0 \
+    tqdm==4.66.5 \
+    pyyaml==6.0.2 \
+    packaging==25.0 \
+    setuptools==75.3.0 \
+    ninja==1.11.1.1
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy project files
+COPY . /workspace/
+
+# Install sparse package (rebuild from source)
+RUN cd /workspace/sparse_package && \
+    rm -rf build/ *.egg-info/ dist/ && \
+    find . -name "*.so" -delete && \
+    /opt/conda/envs/loro_sparse/bin/pip install -e .
+
+# Set PYTHONPATH
+ENV PYTHONPATH="/workspace:/workspace/LORO-main:${PYTHONPATH}"
+
+# Test installation
+RUN /opt/conda/envs/loro_sparse/bin/python -c "import torch; print('PyTorch:', torch.__version__)"
+RUN /opt/conda/envs/loro_sparse/bin/python -c "import sparse; print('Sparse package available!'); from sparse import matmul, MVUE24_approx_triton, soft_threshold24_triton; print('All sparse functions imported successfully!')"
+RUN /opt/conda/envs/loro_sparse/bin/python -c "import sys; sys.path.insert(0, '/workspace/LORO-main'); from loro_torch.sparse_lowrank_module import SparseLowRankLinear, SPARSE_AVAILABLE; print('LORO SPARSE_AVAILABLE:', SPARSE_AVAILABLE)"
+
+# Default command using the correct Python
+CMD ["/opt/conda/envs/loro_sparse/bin/python"] 

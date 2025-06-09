@@ -1,4 +1,4 @@
-Metadata-Version: 2.4
+Metadata-Version: 2.1
 Name: loro-torch
 Version: 1.0
 Summary: LORO: Parameter and Memory Efficient Pretraining via Low-rank Riemannian Optimization
@@ -26,10 +26,3 @@ Requires-Dist: loguru==0.7.2
 Requires-Dist: tensorly==0.8.1
 Requires-Dist: nvitop==1.3.2
 Requires-Dist: lion-pytorch==0.2.2
-Dynamic: author
-Dynamic: author-email
-Dynamic: home-page
-Dynamic: license
-Dynamic: license-file
-Dynamic: requires-dist
-Dynamic: summary
