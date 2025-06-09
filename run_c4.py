@@ -678,56 +678,73 @@ def main(args):
 
     ## NOTE: LORO optimizer
     if args.optimizer.lower() == "loro_adamw":
-        if args.enable_2to4_sparse:
-            # Use sparse low-rank implementation
-            from loro_torch.sparse_lowrank_module import apply_sparse_lowrank_param, get_sparse_lowrank_param
-            apply_fn = apply_sparse_lowrank_param
-            get_param_fn = get_sparse_lowrank_param
-        else:
-            # Use standard LORO implementation
-            from loro_torch.lowrank_module import apply_lowrank_param, get_lowrank_param
-            apply_fn = apply_lowrank_param
-            get_param_fn = get_lowrank_param
-
-        # apply lowrank parameterization
+        # Always use standard LORO implementation as the base
+        from loro_torch.lowrank_module import apply_lowrank_param, get_lowrank_param
+        
+        # Step 1: Apply LORO low-rank parameterization first
         if args.loro_scope is not None:
             if args.loro_mlp_dense:
                 assert (
                     args.loro_scope == "attn" and args.loro_mlp_rank == mlp_rank
                 ), "Only support dense MLP for attn"
 
-            if args.enable_2to4_sparse:
-                apply_fn(
-                    model,
-                    model_config,
-                    model_type="llama",
-                    scope=args.loro_scope,
-                    attn_rank=args.loro_attn_rank,
-                    mlp_rank=args.loro_mlp_rank,
-                    init=args.loro_init,
-                    enable_sparse=True,
-                    sparse_init_scale=args.sparse_init_scale,
-                )
-            else:
-                apply_fn(
-                    model,
-                    model_config,
-                    model_type="llama",
-                    scope=args.loro_scope,
-                    attn_rank=args.loro_attn_rank,
-                    mlp_rank=args.loro_mlp_rank,
-                    init=args.loro_init,
-                )
+            logger.info("🔧 Step 1: Applying LORO low-rank parameterization...")
+            apply_lowrank_param(
+                model,
+                model_config,
+                model_type="llama",
+                scope=args.loro_scope,
+                attn_rank=args.loro_attn_rank,
+                mlp_rank=args.loro_mlp_rank,
+                init=args.loro_init,
+            )
+            logger.info("✅ LORO low-rank parameterization applied successfully!")
         else:
             Warning(f"\nUsing full-rank model ...\n")
 
-        param_groups = get_param_fn(model, model_config, args.loro_lr_scaler)
-        
-        # Set learning rates for sparse scale parameters
+        # Step 2: Apply 2:4 sparse on top of LORO (if enabled)
         if args.enable_2to4_sparse:
+            logger.info("🔧 Step 2: Applying 2:4 sparse parameterization on LORO parameters...")
+            from loro_torch.sparse_overlay import apply_sparse_overlay_on_loro
+            apply_sparse_overlay_on_loro(
+                model,
+                sparse_init_scale=args.sparse_init_scale,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            )
+            logger.info("✅ 2:4 sparse overlay applied on LORO parameters!")
+
+        # Get base parameter groups for LORO
+        param_groups = get_lowrank_param(model, model_config, args.loro_lr_scaler)
+        
+        # Separate sparse scale parameters from regular parameters if 2:4 is enabled
+        if args.enable_2to4_sparse:
+            sparse_params = []
+            regular_params_filtered = []
+            
+            # Collect sparse scale parameters
+            sparse_param_ids = set()
+            for name, module in model.named_modules():
+                if hasattr(module, 'sparse_scale_in') and module.sparse_scale_in.requires_grad:
+                    sparse_params.append(module.sparse_scale_in)
+                    sparse_param_ids.add(id(module.sparse_scale_in))
+                if hasattr(module, 'sparse_scale_out') and module.sparse_scale_out.requires_grad:
+                    sparse_params.append(module.sparse_scale_out)
+                    sparse_param_ids.add(id(module.sparse_scale_out))
+            
+            # Filter out sparse parameters from regular parameters group
             for group in param_groups:
-                if group.get("type") == "sparse_scale":
-                    group["lr"] = args.lr * 0.1  # Smaller learning rate for scale parameters
+                if group["type"] == "regular":
+                    group["params"] = [p for p in group["params"] if id(p) not in sparse_param_ids]
+            
+            # Add sparse scale parameters as separate group
+            if sparse_params:
+                param_groups.append({
+                    "params": sparse_params,
+                    "lr": args.lr * 0.1,  # Smaller learning rate for scale parameters
+                    "weight_decay": 0.0,  # No weight decay for scale parameters
+                    "type": "sparse_scale"
+                })
+                logger.info(f"📊 Added {len(sparse_params)} sparse scale parameters with lr={args.lr * 0.1}")
 
         optimizer = LOROAdamW(
             param_groups,
