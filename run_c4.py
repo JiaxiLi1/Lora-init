@@ -366,6 +366,51 @@ def measure_inference_speed(model, dataloader, tokenizer, device, num_batches=10
         "batches_processed": num_batches
     }
 
+def check_gradient_health(model, step):
+    """Check gradient health and print detailed statistics"""
+    if step % 100 != 0:
+        return
+        
+    print(f"\n🩺 Gradient Health Check at Step {step}")
+    
+    total_params = 0
+    zero_grad_params = 0
+    small_grad_params = 0
+    large_grad_params = 0
+    gradient_norms = []
+    
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            grad_norm = torch.norm(param.grad).item()
+            gradient_norms.append(grad_norm)
+            total_params += 1
+            
+            if grad_norm == 0:
+                zero_grad_params += 1
+            elif grad_norm < 1e-6:
+                small_grad_params += 1
+                if zero_grad_params + small_grad_params <= 5:  # Only print first few
+                    print(f"   ⚠️ Very small grad: {name}, norm={grad_norm:.2e}")
+            elif grad_norm > 1e2:
+                large_grad_params += 1
+                if large_grad_params <= 3:  # Only print first few
+                    print(f"   ⚠️ Large grad: {name}, norm={grad_norm:.2e}")
+    
+    if gradient_norms:
+        import numpy as np
+        avg_norm = np.mean(gradient_norms)
+        std_norm = np.std(gradient_norms)
+        max_norm = np.max(gradient_norms)
+        min_norm = np.min(gradient_norms)
+        
+        print(f"📈 Gradient Statistics:")
+        print(f"   Total params with grad: {total_params}")
+        print(f"   Zero gradients: {zero_grad_params} ({zero_grad_params/total_params*100:.1f}%)")
+        print(f"   Very small gradients (<1e-6): {small_grad_params} ({small_grad_params/total_params*100:.1f}%)")
+        print(f"   Large gradients (>1e2): {large_grad_params} ({large_grad_params/total_params*100:.1f}%)")
+        print(f"   Norm stats: avg={avg_norm:.2e}, std={std_norm:.2e}, max={max_norm:.2e}, min={min_norm:.2e}")
+    print()
+
 def main(args):
     Warning(f"\nSave_ckpt = {args.save_ckpt}, Save_dir = {args.save_dir}.\n")
 
@@ -932,6 +977,9 @@ def main(args):
 
         ## NOTE: The below code is only executed during the update step
 
+        # Check gradient health after backward pass
+        check_gradient_health(model, global_step)
+
         if args.grad_clipping != 0.0:
             torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clipping)
 
@@ -1137,6 +1185,9 @@ def main(args):
             )
 
         update_time = time.time()
+
+        # Check gradient health
+        check_gradient_health(model, global_step)
 
     # ##############################
     # END of training loop

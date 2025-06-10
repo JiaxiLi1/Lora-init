@@ -150,11 +150,21 @@ class SparseOverlayFunction(autograd.Function):
             if random.random() < 0.01:  # 1% chance to print for more debugging info
                 orig_norm = torch.norm(input_view).item()
                 mvue_norm = torch.norm(input_mvue).item()
-                print(f"🔍 MVUE debug: input norm {orig_norm:.4f} → {mvue_norm:.4f} (ratio: {mvue_norm/orig_norm:.4f})")
+                ratio_input = mvue_norm/orig_norm if orig_norm > 0 else float('inf')
+                print(f"🔍 MVUE debug: input norm {orig_norm:.4f} → {mvue_norm:.4f} (ratio: {ratio_input:.4f})")
                 
                 orig_grad_norm = torch.norm(grad_output_view).item()
                 mvue_grad_norm = torch.norm(grad_output_mvue).item()
-                print(f"🔍 MVUE debug: grad_output norm {orig_grad_norm:.4f} → {mvue_grad_norm:.4f} (ratio: {mvue_grad_norm/orig_grad_norm:.4f})")
+                ratio_grad = mvue_grad_norm/orig_grad_norm if orig_grad_norm > 0 else float('inf')
+                
+                # Detailed gradient analysis when norm is very small
+                if orig_grad_norm < 1e-6:
+                    grad_max = grad_output_view.abs().max().item()
+                    grad_min = grad_output_view.abs().min().item()
+                    zero_ratio = (grad_output_view == 0).float().mean().item()
+                    print(f"📊 Zero grad analysis: max={grad_max:.8f}, min={grad_min:.8f}, zero_ratio={zero_ratio:.4f}")
+                
+                print(f"🔍 MVUE debug: grad_output norm {orig_grad_norm:.4f} → {mvue_grad_norm:.4f} (ratio: {ratio_grad:.4f})")
             
             # For weight gradient: input.T @ grad_output -> (in_features, batch) @ (batch, out_features) = (in_features, out_features)
             grad_weight = fake_fp8_mm(input_mvue.t(), grad_output_mvue, torch.float8_e5m2)
