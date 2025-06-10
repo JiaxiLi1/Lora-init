@@ -766,35 +766,9 @@ def main(args):
         # Get base parameter groups for LORO
         param_groups = get_lowrank_param(model, model_config, args.loro_lr_scaler)
         
-        # Separate sparse scale parameters from regular parameters if 2:4 is enabled
+        # Note: Sparse scale parameters are now fixed buffers, not learnable parameters
         if args.enable_2to4_sparse:
-            sparse_params = []
-            regular_params_filtered = []
-            
-            # Collect sparse scale parameters
-            sparse_param_ids = set()
-            for name, module in model.named_modules():
-                if hasattr(module, 'sparse_scale_in') and module.sparse_scale_in.requires_grad:
-                    sparse_params.append(module.sparse_scale_in)
-                    sparse_param_ids.add(id(module.sparse_scale_in))
-                if hasattr(module, 'sparse_scale_out') and module.sparse_scale_out.requires_grad:
-                    sparse_params.append(module.sparse_scale_out)
-                    sparse_param_ids.add(id(module.sparse_scale_out))
-            
-            # Filter out sparse parameters from regular parameters group
-            for group in param_groups:
-                if group["type"] == "regular":
-                    group["params"] = [p for p in group["params"] if id(p) not in sparse_param_ids]
-            
-            # Add sparse scale parameters as separate group
-            if sparse_params:
-                param_groups.append({
-                    "params": sparse_params,
-                    "lr": args.lr * 0.1,  # Smaller learning rate for scale parameters
-                    "weight_decay": 0.0,  # No weight decay for scale parameters
-                    "type": "sparse_scale"
-                })
-                logger.info(f"📊 Added {len(sparse_params)} sparse scale parameters with lr={args.lr * 0.1}")
+            logger.info("📊 Sparse scale parameters are fixed (not learnable) - computed once and then kept constant")
 
         optimizer = LOROAdamW(
             param_groups,

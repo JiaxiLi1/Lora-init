@@ -129,10 +129,10 @@ class SparseOverlayLinear(nn.Module):
         # Store reference to original LORO linear layer
         self.loro_linear = loro_linear
         
-        # Add sparse scaling parameters on same device as LORO parameters
+        # Add sparse scaling parameters as fixed buffers (not learnable parameters)
         device = next(loro_linear.parameters()).device
-        self.sparse_scale_in = nn.Parameter(torch.tensor(sparse_init_scale, device=device))
-        self.sparse_scale_out = nn.Parameter(torch.tensor(sparse_init_scale, device=device))
+        self.register_buffer('sparse_scale_in', torch.tensor(sparse_init_scale, device=device))
+        self.register_buffer('sparse_scale_out', torch.tensor(sparse_init_scale, device=device))
         
         # Lazy initialization flag
         self._scales_initialized = False
@@ -157,7 +157,7 @@ class SparseOverlayLinear(nn.Module):
                     weight_in_sparse = weight_in_sparse.to(torch.bfloat16)
                 scale_in = torch.dot(torch.flatten(weight_in), torch.flatten(weight_in_sparse)) / torch.dot(
                     torch.flatten(weight_in_sparse), torch.flatten(weight_in_sparse))
-                self.sparse_scale_in.copy_(scale_in)
+                self.sparse_scale_in.copy_(scale_in.detach())  # Ensure it's detached from computation graph
             
             if hasattr(self.loro_linear, 'weight_out'):
                 weight_out = self.loro_linear.weight_out
@@ -172,7 +172,7 @@ class SparseOverlayLinear(nn.Module):
                     weight_out_sparse = weight_out_sparse.to(torch.bfloat16)
                 scale_out = torch.dot(torch.flatten(weight_out), torch.flatten(weight_out_sparse)) / torch.dot(
                     torch.flatten(weight_out_sparse), torch.flatten(weight_out_sparse))
-                self.sparse_scale_out.copy_(scale_out)
+                self.sparse_scale_out.copy_(scale_out.detach())  # Ensure it's detached from computation graph
             
             self._scales_initialized = True
             
@@ -180,6 +180,14 @@ class SparseOverlayLinear(nn.Module):
             # If Triton functions fail, use simple initialization
             print(f"⚠️  Triton initialization failed, using simple scale initialization: {e}")
             self._scales_initialized = True
+    
+    def get_scale_info(self):
+        """Get current sparse scale information for debugging"""
+        return {
+            'sparse_scale_in': self.sparse_scale_in.item() if self._scales_initialized else "Not initialized",
+            'sparse_scale_out': self.sparse_scale_out.item() if self._scales_initialized else "Not initialized",
+            'initialized': self._scales_initialized
+        }
     
     def forward(self, x):
         """
@@ -254,7 +262,7 @@ def apply_sparse_overlay_on_loro(
             setattr(parent, child_name, sparse_overlay)
             replaced_modules += 1
             
-            print(f"🔧 Applied sparse overlay to: {name}")
+            print(f"🔧 Applied sparse overlay to: {name} (scale will be computed on first forward pass)")
     
     print(f"✅ Sparse overlay applied to {replaced_modules}/{total_modules} LORO modules")
     
@@ -264,17 +272,9 @@ def apply_sparse_overlay_on_loro(
 
 
 def get_sparse_overlay_parameters(model: nn.Module):
-    """Get sparse overlay parameters for optimizer"""
-    sparse_params = []
-    
-    for name, module in model.named_modules():
-        if isinstance(module, SparseOverlayLinear):
-            if hasattr(module, 'sparse_scale_in'):
-                sparse_params.append(module.sparse_scale_in)
-            if hasattr(module, 'sparse_scale_out'):
-                sparse_params.append(module.sparse_scale_out)
-    
-    return sparse_params
+    """Get sparse overlay parameters for optimizer - Note: Now returns empty since scales are fixed buffers"""
+    # Sparse scale parameters are now fixed buffers (not learnable), so return empty list
+    return []
 
 
 def test_sparse_overlay():
