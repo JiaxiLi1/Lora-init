@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import wandb
 import datetime
+import re
 
 import torch
 import torch.nn as nn
@@ -35,6 +36,21 @@ from loro_torch.loro_optim import LOROAdamW
 
 transformers.logging.set_verbosity_error()
 
+def extract_size_and_type(config_path):
+    size_match = re.search(r'(\d+[mb])', config_path.lower())
+    size = size_match.group(1) if size_match else "unknown"
+
+    if "small" in config_path:
+        type = "small"
+    elif "delta" in config_path:
+        type = "delta"
+    elif "normal" in config_path:
+        type = "normal"
+    else:
+        return f"{size}"
+
+    return f"{size}_{type}"
+
 def str_to_bool(value):
     if isinstance(value, bool):
         return value
@@ -48,6 +64,20 @@ def str_to_bool(value):
 def parse_args():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("--attn_2by4", type=str_to_bool, default=False)
+    parser.add_argument("--mlp_2by4", type=str_to_bool, default=True)
+    parser.add_argument(
+        "--enable_2to4_sparse",
+        type=str_to_bool,
+        default=False,
+        help="Enable 2:4 sparse training on low-rank matrices"
+    )
+    parser.add_argument(
+        "--sparse_init_scale",
+        type=float,
+        default=1.0,
+        help="Initial scale for sparse weights"
+    )
     parser.add_argument("--c4_local", type=str_to_bool, default=True)
     parser.add_argument("--train_data_path", type=str, default="en/c4-train.*.json.gz",
                         help="Path to C4 training data files")
@@ -173,20 +203,6 @@ def parse_args():
         "--loro_mlp_dense",
         action="store_true",
         default=False,
-    )
-    
-    # 2:4 Sparse training parameters
-    parser.add_argument(
-        "--enable_2to4_sparse",
-        action="store_true",
-        default=False,
-        help="Enable 2:4 sparse training on low-rank matrices"
-    )
-    parser.add_argument(
-        "--sparse_init_scale",
-        type=float,
-        default=1.0,
-        help="Initial scale for sparse weights"
     )
 
     # disable ddp, single_gpu
@@ -438,6 +454,10 @@ def main(args):
         model_max_length=args.max_length,
         # cache_dir=f"{args.model_dir}/t5-base-tokenizer",
     )
+    
+    # Ensure tokenizer has a valid pad_token_id
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     def preprocess_batched(batch):
         batch = tokenizer(
@@ -512,9 +532,17 @@ def main(args):
         }
     )
     if global_rank == 0:
+        model_size = extract_size_and_type(args.model_config)
+        runname = f"{time.strftime('%m%d_%H%M%S')}_gc{args.grad_clipping}_step{args.num_training_steps}_" \
+                  f"model{model_size}_ar{args.loro_attn_rank}_loty{args.loro_type}_fr{args.loro_freq}_ls_{args.loro_lr_scaler}_sc{args.scheduler}_crfr{args.cosine_restart_freq}_as{args.lr_adjust_steps}_ra{args.loro_refresh}_rf{args.loro_refresh_freq}_sc_{args.loro_scope}_ini_{args.loro_init}_op_{args.optimizer}_mlr{args.min_lr_ratio}_lr{args.lr}_bs{args.batch_size}_" \
+                  f"tbs{args.total_batch_size}_severy_{args.save_every}_eevery_{args.eval_every}_2by4{args.enable_2to4_sparse}_a2by4{args.attn_2by4}_m2by4{args.mlp_2by4}_" \
+                  f"save{args.save_ckpt}"
+        print(f"runname= {runname}")
+        runname_dir = os.path.join(args.save_dir, runname)
+        os.makedirs(runname_dir, exist_ok=True)
         wandb.init(
-            project="galore-c4",
-            name=args.desc,
+            project="2by4",
+            name=runname,
         )
 
     if global_rank == 0:
@@ -705,13 +733,35 @@ def main(args):
         # Step 2: Apply 2:4 sparse on top of LORO (if enabled)
         if args.enable_2to4_sparse:
             logger.info("🔧 Step 2: Applying 2:4 sparse parameterization on LORO parameters...")
-            from loro_torch.sparse_overlay import apply_sparse_overlay_on_loro
-            apply_sparse_overlay_on_loro(
-                model,
-                sparse_init_scale=args.sparse_init_scale,
-                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-            )
-            logger.info("✅ 2:4 sparse overlay applied on LORO parameters!")
+            
+            # Build target modules list based on attn_2by4 and mlp_2by4 flags
+            target_modules = []
+            
+            # Attention modules
+            attn_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+            # MLP modules  
+            mlp_modules = ["gate_proj", "up_proj", "down_proj"]
+            
+            if args.attn_2by4:
+                target_modules.extend(attn_modules)
+                logger.info("📌 将对注意力模块应用2:4稀疏: " + str(attn_modules))
+            
+            if args.mlp_2by4:
+                target_modules.extend(mlp_modules)
+                logger.info("📌 将对MLP模块应用2:4稀疏: " + str(mlp_modules))
+            
+            if not target_modules:
+                logger.warning("⚠️ 启用了2:4稀疏但没有选择任何目标模块！请检查 --attn_2by4 和 --mlp_2by4 参数")
+            else:
+                logger.info(f"🎯 最终目标模块列表: {target_modules}")
+                
+                from loro_torch.sparse_overlay import apply_sparse_overlay_on_loro
+                apply_sparse_overlay_on_loro(
+                    model,
+                    sparse_init_scale=args.sparse_init_scale,
+                    target_modules=target_modules
+                )
+                logger.info("✅ 2:4 sparse overlay applied on LORO parameters!")
 
         # Get base parameter groups for LORO
         param_groups = get_lowrank_param(model, model_config, args.loro_lr_scaler)
@@ -926,17 +976,17 @@ def main(args):
         update_time = time.time() - update_time
 
         # verbose logging
-        # torch.cuda.synchronize()
-        # max_memory_GB = torch.cuda.max_memory_allocated() / 1024**3
-        # torch.cuda.reset_max_memory_allocated()
+        torch.cuda.synchronize()
+        max_memory_GB = torch.cuda.max_memory_allocated() / 1024**3
+        torch.cuda.reset_max_memory_allocated()
         # print(max_memory_GB)
 
-        # if update_step % 1000 == 0 or update_step < 10:
-        #     print(
-        #         f"Iter = {update_step}, global step = {global_step}, "
-        #         f"Total loss = {loss.item()}, "
-        #         f"lr = {lr_tmp}, Time = {update_time} sec, max_memory_GB = {max_memory_GB:.2f}"
-        #     )
+        if update_step % 1000 == 0 or update_step < 10:
+            print(
+                f"Iter = {update_step}, global step = {global_step}, "
+                f"Total loss = {loss.item()}, "
+                f"lr = {lr_tmp}, Time = {update_time} sec, max_memory_GB = {max_memory_GB:.2f}"
+            )
 
         # save checkpoint by save_every
         if (
@@ -945,12 +995,19 @@ def main(args):
             and global_rank == 0
         ):
             if args.save_ckpt:
-                current_model_directory = f"{args.save_dir}/model_{update_step}"
+                current_model_directory = f"{args.save_dir}/{runname}/model_{update_step}"
                 logger.info(
                     f"Saving model and optimizer to {current_model_directory}, update step {update_step}"
                 )
                 os.makedirs(args.save_dir, exist_ok=True)
                 os.makedirs(current_model_directory, exist_ok=True)
+                
+                # Fix generation_config pad_token_id before saving
+                model_to_save = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+                if hasattr(model_to_save, 'generation_config') and model_to_save.generation_config is not None:
+                    if model_to_save.generation_config.pad_token_id == -1:
+                        model_to_save.generation_config.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+                
                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                     model.module.save_pretrained(
                         current_model_directory, max_shard_size="100GB"
@@ -979,6 +1036,7 @@ def main(args):
                     "tokens_seen": tokens_seen,
                     "tokens_seen_before": tokens_seen_before,
                     "update_time": update_time,
+                    "max_memory_GB": max_memory_GB,
                 }
                 with open(f"{current_model_directory}/training_state.json", "w") as f:
                     json.dump(training_state_checkpoint, f, indent=4)
@@ -990,7 +1048,7 @@ def main(args):
                 wandb_info = {
                     "wandb_id": wandb.run.id,
                 }
-                with open(f"{args.save_dir}/wandb.json", "w") as f:
+                with open(f"{args.save_dir}/{runname}/wandb.json", "w") as f:
                     json.dump(wandb_info, f, indent=4)
 
         # evaluation
@@ -1028,7 +1086,7 @@ def main(args):
             df_eval_tmp = pd.DataFrame(df_eval_tmp)
             df_eval_all = pd.concat([df_eval_all, df_eval_tmp], ignore_index=True)
             df_eval_all.to_csv(
-                f"{args.save_dir}/eval_stats_{args.timestamp}.csv", index=False
+                f"{args.save_dir}/{runname}/eval_stats_{args.timestamp}.csv", index=False
             )
 
             logger.info(f"Eval loss at step {update_step}: {total_loss}")
@@ -1066,7 +1124,7 @@ def main(args):
             df_train_tmp = pd.DataFrame(df_train_tmp)
             df_train_all = pd.concat([df_train_all, df_train_tmp], ignore_index=True)
             df_train_all.to_csv(
-                f"{args.save_dir}/train_stats_{args.timestamp}.csv", index=False
+                f"{args.save_dir}/{runname}/train_stats_{args.timestamp}.csv", index=False
             )
 
         update_time = time.time()
@@ -1078,7 +1136,7 @@ def main(args):
     if global_rank == 0:
         pbar.close()
 
-    current_model_directory = f"{args.save_dir}/model_{update_step}"
+    current_model_directory = f"{args.save_dir}/{runname}/model_{update_step}"
     if (
         global_rank == 0
         and not os.path.exists(current_model_directory)
@@ -1088,6 +1146,13 @@ def main(args):
             f"Saving model and optimizer to {current_model_directory}, update step {update_step}"
         )
         os.makedirs(current_model_directory, exist_ok=True)
+        
+        # Fix generation_config pad_token_id before saving
+        model_to_save = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
+        if hasattr(model_to_save, 'generation_config') and model_to_save.generation_config is not None:
+            if model_to_save.generation_config.pad_token_id == -1:
+                model_to_save.generation_config.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        
         if isinstance(model, nn.parallel.DistributedDataParallel):
             model.module.save_pretrained(current_model_directory)
         else:
@@ -1158,7 +1223,7 @@ def main(args):
     }
     df_eval_tmp = pd.DataFrame(df_eval_tmp)
     df_eval_all = pd.concat([df_eval_all, df_eval_tmp], ignore_index=True)
-    df_eval_all.to_csv(f"{args.save_dir}/eval_stats_{args.timestamp}.csv", index=False)
+    df_eval_all.to_csv(f"{args.save_dir}/{runname}/eval_stats_{args.timestamp}.csv", index=False)
 
     logger.info("Script finished successfully")
     print(f"Rank {global_rank} finished successfully")
