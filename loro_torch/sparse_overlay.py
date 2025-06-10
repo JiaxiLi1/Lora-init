@@ -46,27 +46,68 @@ class SparseOverlayFunction(autograd.Function):
     @staticmethod
     @custom_fwd
     def forward(ctx, input, weight, bias, sparse_scale):
+        # 🔍 Debug: Check inputs for NaN
+        if torch.isnan(input).any():
+            print(f"❌ FORWARD: NaN detected in INPUT! Shape: {input.shape}")
+        if torch.isnan(weight).any():
+            print(f"❌ FORWARD: NaN detected in WEIGHT! Shape: {weight.shape}")
+        if torch.isnan(sparse_scale).any():
+            print(f"❌ FORWARD: NaN detected in SPARSE_SCALE! Value: {sparse_scale}")
+            
         ctx.save_for_backward(input, weight, bias, sparse_scale)
         ctx.shape = input.shape
         input = input.view(-1, input.shape[-1])
         
         # Apply 2:4 sparsity to the LORO weight
         weight_sparse = get_sparse_weight(weight, sparse_scale)
+        
+        # 🔍 Debug: Check sparse weight
+        if torch.isnan(weight_sparse).any():
+            print(f"❌ FORWARD: NaN detected in WEIGHT_SPARSE after get_sparse_weight!")
+            print(f"   Original weight has NaN: {torch.isnan(weight).any()}")
+            print(f"   Sparse scale: {sparse_scale}")
+        
         # For LORO: weight_in is (in_features, rank), weight_out is (out_features, rank)
         # input @ weight_in -> (batch, in_features) @ (in_features, rank) = (batch, rank)
         # x_proj @ weight_out.T -> (batch, rank) @ (rank, out_features) = (batch, out_features)
         output = fake_fp8_mm(input, weight_sparse, torch.float8_e4m3fn)
         
+        # 🔍 Debug: Check output
+        if torch.isnan(output).any():
+            print(f"❌ FORWARD: NaN detected in OUTPUT after matmul!")
+            print(f"   Input has NaN: {torch.isnan(input).any()}")
+            print(f"   Weight_sparse has NaN: {torch.isnan(weight_sparse).any()}")
+        
         if bias is None:
-            return output.view(*ctx.shape[:-1], -1)
+            final_output = output.view(*ctx.shape[:-1], -1)
         else:
-            return output.view(*ctx.shape[:-1], -1) + bias
+            final_output = output.view(*ctx.shape[:-1], -1) + bias
+            if torch.isnan(final_output).any() and not torch.isnan(output).any():
+                print(f"❌ FORWARD: NaN introduced by BIAS addition!")
+                
+        return final_output
 
     @staticmethod
     @custom_bwd
     def backward(ctx, grad_output):
+        # 🔍 Debug: Check grad_output before half() conversion
+        if torch.isnan(grad_output).any():
+            print(f"❌ BACKWARD: NaN in grad_output BEFORE half() conversion!")
+            
         grad_output = grad_output.half()
+        
+        # 🔍 Debug: Check grad_output after half() conversion
+        if torch.isnan(grad_output).any():
+            print(f"❌ BACKWARD: NaN in grad_output AFTER half() conversion!")
+            
         input, weight, bias, sparse_scale = ctx.saved_tensors
+        
+        # 🔍 Debug: Check saved tensors
+        if torch.isnan(input).any():
+            print(f"❌ BACKWARD: NaN in saved INPUT!")
+        if torch.isnan(weight).any():
+            print(f"❌ BACKWARD: NaN in saved WEIGHT!")
+            
         grad_input = grad_weight = grad_bias = grad_sparse_scale = None
         
         if ctx.needs_input_grad[0]:
@@ -75,27 +116,59 @@ class SparseOverlayFunction(autograd.Function):
             # This ensures grad_input doesn't carry sparse bias
             grad_input = fake_fp8_mm(grad_output_view, weight.t(), torch.float8_e5m2).view(ctx.shape)
             
+            # 🔍 Debug: Check grad_input
+            if torch.isnan(grad_input).any():
+                print(f"❌ BACKWARD: NaN in computed GRAD_INPUT!")
+                print(f"   grad_output_view has NaN: {torch.isnan(grad_output_view).any()}")
+                print(f"   weight.t() has NaN: {torch.isnan(weight.t()).any()}")
+            
         if ctx.needs_input_grad[1]:
             input_view = input.view(-1, input.shape[-1])
             grad_output_view = grad_output.view(-1, grad_output.shape[-1])
+            
+            # 🔍 Debug: Before MVUE
+            if torch.isnan(input_view).any():
+                print(f"❌ BACKWARD: NaN in input_view BEFORE MVUE!")
+            if torch.isnan(grad_output_view).any():
+                print(f"❌ BACKWARD: NaN in grad_output_view BEFORE MVUE!")
             
             # Apply MVUE to both input and grad_output for complete bias correction
             # The input was computed using sparse weights, so we need to recover the "what it should have been"
             input_mvue = MVUE24_approx_triton(input_view)
             grad_output_mvue = MVUE24_approx_triton(grad_output_view)
             
-            # Debug: Check MVUE effectiveness (only print occasionally to avoid spam)
+            # 🔍 Debug: After MVUE
+            if torch.isnan(input_mvue).any():
+                print(f"❌ BACKWARD: NaN in input_mvue AFTER MVUE!")
+                print(f"   Input before MVUE had NaN: {torch.isnan(input_view).any()}")
+            if torch.isnan(grad_output_mvue).any():
+                print(f"❌ BACKWARD: NaN in grad_output_mvue AFTER MVUE!")
+                print(f"   grad_output before MVUE had NaN: {torch.isnan(grad_output_view).any()}")
+            
+            # Debug: Check MVUE effectiveness (print more frequently during debugging)
             import random
-            if random.random() < 0.001:  # 0.1% chance to print
+            if random.random() < 0.01:  # 1% chance to print for more debugging info
                 orig_norm = torch.norm(input_view).item()
                 mvue_norm = torch.norm(input_mvue).item()
                 print(f"🔍 MVUE debug: input norm {orig_norm:.4f} → {mvue_norm:.4f} (ratio: {mvue_norm/orig_norm:.4f})")
+                
+                orig_grad_norm = torch.norm(grad_output_view).item()
+                mvue_grad_norm = torch.norm(grad_output_mvue).item()
+                print(f"🔍 MVUE debug: grad_output norm {orig_grad_norm:.4f} → {mvue_grad_norm:.4f} (ratio: {mvue_grad_norm/orig_grad_norm:.4f})")
             
             # For weight gradient: input.T @ grad_output -> (in_features, batch) @ (batch, out_features) = (in_features, out_features)
             grad_weight = fake_fp8_mm(input_mvue.t(), grad_output_mvue, torch.float8_e5m2)
             
+            # 🔍 Debug: Check final grad_weight
+            if torch.isnan(grad_weight).any():
+                print(f"❌ BACKWARD: NaN in computed GRAD_WEIGHT!")
+                print(f"   input_mvue.t() has NaN: {torch.isnan(input_mvue.t()).any()}")
+                print(f"   grad_output_mvue has NaN: {torch.isnan(grad_output_mvue).any()}")
+            
         if ctx.needs_input_grad[2]:
             grad_bias = grad_output.sum(0)
+            if torch.isnan(grad_bias).any():
+                print(f"❌ BACKWARD: NaN in computed GRAD_BIAS!")
             
         if ctx.needs_input_grad[3]:
             # Sparse scale gradient (simplified)

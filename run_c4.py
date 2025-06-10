@@ -912,6 +912,17 @@ def main(args):
         tokens_seen += (batch["input_ids"] != pad_idx).sum().item() * world_size
 
         loss = model(**batch, labels=labels).loss
+        
+        # 🔍 Debug: Check loss for NaN/Inf
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"❌ TRAINING: NaN/Inf loss detected at step {global_step}! Loss: {loss}")
+            # Check model parameters
+            nan_params = []
+            for name, param in model.named_parameters():
+                if torch.isnan(param).any():
+                    nan_params.append(name)
+            if nan_params:
+                print(f"❌ TRAINING: Parameters with NaN: {nan_params[:5]}...")  # Show first 5
 
         scaled_loss = loss / args.gradient_accumulation
         scaled_loss.backward()
@@ -967,6 +978,24 @@ def main(args):
                 f"Total loss = {loss.item()}, "
                 f"lr = {lr_tmp}, Time = {update_time} sec, max_memory_GB = {max_memory_GB:.2f}"
             )
+            
+        # 🔍 Debug: Periodic health check every 100 steps
+        if update_step % 100 == 0:
+            param_health = {"healthy": 0, "nan": 0, "inf": 0, "high_norm": 0}
+            for name, param in model.named_parameters():
+                if torch.isnan(param).any():
+                    param_health["nan"] += 1
+                elif torch.isinf(param).any():
+                    param_health["inf"] += 1
+                elif torch.norm(param) > 1000:
+                    param_health["high_norm"] += 1
+                else:
+                    param_health["healthy"] += 1
+                    
+            if param_health["nan"] > 0 or param_health["inf"] > 0:
+                print(f"🚨 HEALTH CHECK @ step {update_step}: {param_health}")
+            elif update_step % 500 == 0:  # Only print healthy status every 500 steps
+                print(f"✅ HEALTH CHECK @ step {update_step}: {param_health}")
 
         # save checkpoint by save_every
         if (

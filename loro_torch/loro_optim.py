@@ -43,6 +43,32 @@ def get_loro_update_fn(type):
     elif type == "loro":
 
         def loro_update_fn(optimizer, M, N, dM, dN, use_exact_loro):
+            
+            # 🔍 Debug: Check inputs to LORO optimizer
+            if torch.isnan(M).any():
+                print(f"❌ LORO: NaN in parameter M! Shape: {M.shape}")
+            if torch.isnan(N).any():
+                print(f"❌ LORO: NaN in parameter N! Shape: {N.shape}")
+            if torch.isnan(dM).any():
+                print(f"❌ LORO: NaN in gradient dM! Shape: {dM.shape}")
+            if torch.isnan(dN).any():
+                print(f"❌ LORO: NaN in gradient dN! Shape: {dN.shape}")
+                
+            # 🔍 Debug: Check matrix condition numbers with detailed info
+            try:
+                # Handle BFloat16 compatibility - convert to float32 for condition number calculation
+                M_float = M.float() if M.dtype == torch.bfloat16 else M
+                N_float = N.float() if N.dtype == torch.bfloat16 else N
+                
+                cond_M = torch.linalg.cond(M_float).item()
+                cond_N = torch.linalg.cond(N_float).item()
+                if cond_M > 1e10 or cond_N > 1e10:
+                    print(f"⚠️  LORO: High condition numbers - M: {cond_M:.2e}, N: {cond_N:.2e}")
+            except Exception as e:
+                print(f"❌ LORO: Cannot compute condition numbers! Shape M: {M.shape}, N: {N.shape}")
+                print(f"    Error: {type(e).__name__}: {e}")
+                print(f"    M dtype: {M.dtype}, N dtype: {N.dtype}")
+                # Skip the detailed debug info that might cause additional errors
 
             lr_M = optimizer.state[M]["lr"]
             lr_mul_M = optimizer.state[M]["lr_scaler"]
@@ -94,8 +120,22 @@ def get_loro_update_fn(type):
             Q1, K2 = QR(Y2)
             K0 = U.T @ G @ V
             """
-            U, Rm = torch.linalg.qr(M)
-            V, Rn = torch.linalg.qr(N)
+            # Additional safety check before QR decomposition
+            try:
+                U, Rm = torch.linalg.qr(M)
+                V, Rn = torch.linalg.qr(N)
+            except Exception as e:
+                print(f"❌ LORO: QR decomposition failed! Error: {e}")
+                print(f"🔄 LORO: Falling back to lazy update")
+                M -= lr_M * lr_mul_M * dM
+                N -= lr_N * lr_mul_N * dN
+                
+                if wd_M > 0:
+                    M -= lr_M * wd_M * M
+                if wd_N > 0:
+                    N -= lr_N * wd_N * N
+                
+                return M.to(dtype), N.to(dtype)
 
             # Check for numerical stability - if matrices are singular, fall back to lazy update or use pseudoinverse
             try:
