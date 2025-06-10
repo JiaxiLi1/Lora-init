@@ -70,13 +70,13 @@ def parse_args():
         "--enable_2to4_sparse",
         type=str_to_bool,
         default=False,
-        help="Enable 2:4 sparse training on low-rank matrices"
+                help="Enable 2:4 sparse training on low-rank matrices"
     )
     parser.add_argument(
         "--sparse_init_scale",
         type=float,
         default=1.0,
-        help="Initial scale for sparse weights"
+        help="Initial scale for sparse weights (will be overwritten by computed values)"
     )
     parser.add_argument("--c4_local", type=str_to_bool, default=True)
     parser.add_argument("--train_data_path", type=str, default="en/c4-train.*.json.gz",
