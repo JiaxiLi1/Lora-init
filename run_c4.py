@@ -161,6 +161,12 @@ def parse_args():
         help="frequency of using LORO exact update",
     )
     parser.add_argument(
+        "--loro_fallback_freq",
+        type=int,
+        default=None,
+        help="fallback frequency if numerical issues occur (auto-adjust loro_freq)",
+    )
+    parser.add_argument(
         "--loro_refresh",
         type=str,
         default=None,

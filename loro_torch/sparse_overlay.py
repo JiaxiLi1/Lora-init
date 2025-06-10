@@ -18,21 +18,7 @@ import math
 from typing import Optional, List
 
 # Import 2:4 sparse implementations
-try:
-    from sparse import matmul, MVUE24_approx_triton, soft_threshold24_triton
-except ImportError:
-    try:
-        import sys
-        sys.path.append('/home/rtx3090/code_jiaxi/2by4-pretrain-acc-examples')
-        from sparse import matmul, MVUE24_approx_triton, soft_threshold24_triton
-    except ImportError:
-        print("Warning: sparse package not found. Creating fallback implementations.")
-        def MVUE24_approx_triton(x):
-            return x  # Fallback: return input unchanged
-        def soft_threshold24_triton(x):
-            return x, torch.ones_like(x)  # Fallback: no sparsity
-        def matmul(a, b, c_dtype=torch.float32):
-            return torch.mm(a, b).to(c_dtype)  # Standard matrix multiplication
+from sparse import matmul, MVUE24_approx_triton, soft_threshold24_triton
 
 
 def fake_fp8_mm(a, b, dtype):
@@ -47,6 +33,14 @@ class SparseOverlayFunction(autograd.Function):
     """
     Sparse overlay autograd function that applies 2:4 sparsity on LORO parameters
     with MVUE gradient estimation for unbiased backward pass.
+    
+    Key improvements for numerical stability:
+    1. Forward: Use sparse weights for computation efficiency
+    2. Backward: Use DENSE weights for grad_input (prevents bias propagation)
+    3. Backward: Apply MVUE to BOTH input and grad_output for grad_weight
+    
+    This ensures that LORO optimizer receives unbiased gradients, preventing
+    the parameter matrices from becoming ill-conditioned over time.
     """
     
     @staticmethod
@@ -75,20 +69,30 @@ class SparseOverlayFunction(autograd.Function):
         input, weight, bias, sparse_scale = ctx.saved_tensors
         grad_input = grad_weight = grad_bias = grad_sparse_scale = None
         
-        # Get sparse weight for backward pass
-        weight_sparse = get_sparse_weight(weight, sparse_scale)
-        
         if ctx.needs_input_grad[0]:
             grad_output_view = grad_output.view(-1, grad_output.shape[-1])
-            # For backward: grad_output @ weight_sparse.T for the input gradient
-            grad_input = fake_fp8_mm(grad_output_view, weight_sparse.t(), torch.float8_e5m2).view(ctx.shape)
+            # Use dense weight for grad_input calculation (not sparse weight!)
+            # This ensures grad_input doesn't carry sparse bias
+            grad_input = fake_fp8_mm(grad_output_view, weight.t(), torch.float8_e5m2).view(ctx.shape)
             
         if ctx.needs_input_grad[1]:
             input_view = input.view(-1, input.shape[-1])
             grad_output_view = grad_output.view(-1, grad_output.shape[-1])
-            # Use MVUE for unbiased gradient estimation
+            
+            # Apply MVUE to both input and grad_output for complete bias correction
+            # The input was computed using sparse weights, so we need to recover the "what it should have been"
+            input_mvue = MVUE24_approx_triton(input_view)
+            grad_output_mvue = MVUE24_approx_triton(grad_output_view)
+            
+            # Debug: Check MVUE effectiveness (only print occasionally to avoid spam)
+            import random
+            if random.random() < 0.001:  # 0.1% chance to print
+                orig_norm = torch.norm(input_view).item()
+                mvue_norm = torch.norm(input_mvue).item()
+                print(f"🔍 MVUE debug: input norm {orig_norm:.4f} → {mvue_norm:.4f} (ratio: {mvue_norm/orig_norm:.4f})")
+            
             # For weight gradient: input.T @ grad_output -> (in_features, batch) @ (batch, out_features) = (in_features, out_features)
-            grad_weight = fake_fp8_mm(input_view.t(), MVUE24_approx_triton(grad_output_view), torch.float8_e5m2)
+            grad_weight = fake_fp8_mm(input_mvue.t(), grad_output_mvue, torch.float8_e5m2)
             
         if ctx.needs_input_grad[2]:
             grad_bias = grad_output.sum(0)

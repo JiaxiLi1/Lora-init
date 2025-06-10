@@ -97,8 +97,30 @@ def get_loro_update_fn(type):
             U, Rm = torch.linalg.qr(M)
             V, Rn = torch.linalg.qr(N)
 
-            G_x_V = torch.linalg.solve(Rn.T, dM.T).T  # dM @ Rn_inv
-            Ut_x_G = torch.linalg.solve(Rm.T, dN.T)  # Rm_inv.T @ dN.T
+            # Check for numerical stability - if matrices are singular, fall back to lazy update or use pseudoinverse
+            try:
+                G_x_V = torch.linalg.solve(Rn.T, dM.T).T  # dM @ Rn_inv
+                Ut_x_G = torch.linalg.solve(Rm.T, dN.T)  # Rm_inv.T @ dN.T
+            except torch._C._LinAlgError:
+                # Try using pseudoinverse for better numerical stability
+                try:
+                    print("⚠️  Warning: Singular matrix detected, trying pseudoinverse...")
+                    Rn_inv = torch.linalg.pinv(Rn.T)
+                    Rm_inv = torch.linalg.pinv(Rm.T)
+                    G_x_V = (dM @ Rn_inv.T)  # dM @ Rn_inv
+                    Ut_x_G = (Rm_inv @ dN.T)  # Rm_inv.T @ dN.T
+                except Exception as e:
+                    # If pseudoinverse also fails, fall back to lazy LORO update
+                    print(f"⚠️  Warning: Both solve and pinv failed ({e}), falling back to lazy update")
+                    M -= lr_M * lr_mul_M * dM
+                    N -= lr_N * lr_mul_N * dN
+                    
+                    if wd_M > 0:
+                        M -= lr_M * wd_M * M
+                    if wd_N > 0:
+                        N -= lr_N * wd_N * N
+                    
+                    return M.to(dtype), N.to(dtype)
 
             K0 = Ut_x_G @ V
             Y1 = (Ut_x_G - Ut_x_G @ V @ V.T).T
