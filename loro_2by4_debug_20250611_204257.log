@@ -1,397 +1,0 @@
-Starting script
-2025-06-11 20:43:00.947 | INFO     | __main__:parse_args:222 - No save_dir specified, will use /home/rtx3090/code_jiaxi/LORO-main/ckpt
-2025-06-11 20:43:00.948 | INFO     | peft_pretraining.args_utils:check_args_torchrun_main:36 - save_dir not specified, using /home/rtx3090/code_jiaxi/LORO-main/ckpt
-
-2025-06-11 20:43:00.948 | INFO     | peft_pretraining.args_utils:check_args_torchrun_main:40 - Logging to /home/rtx3090/code_jiaxi/LORO-main/ckpt/log_2025-06-11_20-43-00.txt
-
-
-
-Experiment = loro_adamw_loro_freq_500_r_attn256_mlp256_all_init_lrk_xavier_rs_-1_sparse2to4_rfsh_all_500_lr_0.001_gc0.0_cosine_restart_cyc500_wp5_adj-2000_2000_0.1
-
-
-2025-06-11 20:43:00.949 | INFO     | __main__:main:544 - Global rank 0, local rank 0, device: 0
-2025-06-11 20:43:00.949 | INFO     | __main__:main:544 - Global rank 0, local rank 0, device: 0
-2025-06-11 20:43:00.950 | INFO     | __main__:main:556 - Process group initialized
-2025-06-11 20:43:00.950 | INFO     | __main__:main:556 - Process group initialized
-Rank 0 using device cuda:0
-
-
-# CUDA visible devices: 1
-
-
-2025-06-11 20:43:00.950 | INFO     | __main__:main:587 - Using dist with rank 0 (only rank 0 will log)
-2025-06-11 20:43:00.950 | INFO     | __main__:main:587 - Using dist with rank 0 (only rank 0 will log)
-2025-06-11 20:43:00.950 | INFO     | __main__:main:588 - ****************************************
-2025-06-11 20:43:00.950 | INFO     | __main__:main:588 - ****************************************
-2025-06-11 20:43:00.950 | INFO     | __main__:main:589 - Starting training with the arguments
-2025-06-11 20:43:00.950 | INFO     | __main__:main:589 - Starting training with the arguments
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - attn_2by4                      False
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - attn_2by4                      False
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - mlp_2by4                       True
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - mlp_2by4                       True
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - enable_2to4_sparse             True
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - enable_2to4_sparse             True
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - sparse_init_scale              1.0
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - sparse_init_scale              1.0
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - c4_local                       False
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - c4_local                       False
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - train_data_path                en/c4-train.*.json.gz
-2025-06-11 20:43:00.950 | INFO     | __main__:main:591 - train_data_path                en/c4-train.*.json.gz
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - val_data_path                  en/c4-validation.*.json.gz
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - val_data_path                  en/c4-validation.*.json.gz
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - model_config                   configs/llama_130m.json
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - model_config                   configs/llama_130m.json
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - use_hf_model                   False
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - use_hf_model                   False
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - continue_from                  None
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - continue_from                  None
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - batch_size                     64
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - batch_size                     64
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - gradient_accumulation          8
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - gradient_accumulation          8
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - total_batch_size               512
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - total_batch_size               512
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - max_length                     256
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - max_length                     256
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - optimizer                      loro_adamw
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - optimizer                      loro_adamw
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - lr                             0.001
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - lr                             0.001
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - scheduler                      cosine_restart
-2025-06-11 20:43:00.951 | INFO     | __main__:main:591 - scheduler                      cosine_restart
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - cosine_restart_freq            500
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - cosine_restart_freq            500
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - cosine_restart_warmup          5
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - cosine_restart_warmup          5
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - lr_jag_after_warmup            False
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - lr_jag_after_warmup            False
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - lr_adjust_steps                -2000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - lr_adjust_steps                -2000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - min_lr_ratio                   0.1
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - min_lr_ratio                   0.1
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - activation_checkpointing       False
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - activation_checkpointing       False
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - weight_decay                   0.0
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - weight_decay                   0.0
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - warmup_steps                   2000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - warmup_steps                   2000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - eval_every                     1000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - eval_every                     1000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - num_training_steps             20000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - num_training_steps             20000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - max_train_tokens               None
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - max_train_tokens               None
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - save_every                     1000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - save_every                     1000
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - save_ckpt                      True
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - save_ckpt                      True
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - save_dir                       /home/rtx3090/code_jiaxi/LORO-main/ckpt
-2025-06-11 20:43:00.952 | INFO     | __main__:main:591 - save_dir                       /home/rtx3090/code_jiaxi/LORO-main/ckpt
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - tags                           None
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - tags                           None
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - dtype                          bfloat16
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - dtype                          bfloat16
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - workers                        8
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - workers                        8
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - seed                           43
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - seed                           43
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - name                           test
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - name                           test
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - grad_clipping                  0.0
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - grad_clipping                  0.0
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - beta1                          0.0
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - beta1                          0.0
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - rank                           128
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - rank                           128
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - update_proj_gap                50
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - update_proj_gap                50
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - galore_scale                   1.0
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - galore_scale                   1.0
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - proj_type                      std
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - proj_type                      std
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - loro_type                      loro
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - loro_type                      loro
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - loro_freq                      500
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - loro_freq                      500
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - loro_fallback_freq             None
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - loro_fallback_freq             None
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - loro_refresh                   all
-2025-06-11 20:43:00.953 | INFO     | __main__:main:591 - loro_refresh                   all
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_refresh_freq              500
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_refresh_freq              500
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_attn_rank                 256
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_attn_rank                 256
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_mlp_rank                  256
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_mlp_rank                  256
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_init                      xavier
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_init                      xavier
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_scope                     all
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_scope                     all
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_lr_scaler                 -1
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_lr_scaler                 -1
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_mlp_dense                 False
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - loro_mlp_dense                 False
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - single_gpu                     False
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - single_gpu                     False
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - desc                           loro_adamw_loro_freq_500_r_attn256_mlp256_all_init_lrk_xavier_rs_-1_sparse2to4_rfsh_all_500_lr_0.001_gc0.0_cosine_restart_cyc500_wp5_adj-2000_2000_0.1
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - desc                           loro_adamw_loro_freq_500_r_attn256_mlp256_all_init_lrk_xavier_rs_-1_sparse2to4_rfsh_all_500_lr_0.001_gc0.0_cosine_restart_cyc500_wp5_adj-2000_2000_0.1
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - timestamp                      2025-06-11_20-43-00
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - timestamp                      2025-06-11_20-43-00
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - log_path                       /home/rtx3090/code_jiaxi/LORO-main/ckpt/log_2025-06-11_20-43-00.txt
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - log_path                       /home/rtx3090/code_jiaxi/LORO-main/ckpt/log_2025-06-11_20-43-00.txt
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - num_cuda                       1
-2025-06-11 20:43:00.954 | INFO     | __main__:main:591 - num_cuda                       1
-2025-06-11 20:43:00.954 | INFO     | __main__:main:592 - ****************************************
-2025-06-11 20:43:00.954 | INFO     | __main__:main:592 - ****************************************
-2025-06-11 20:43:15.666 | INFO     | __main__:main:608 - Shuffling data with seed 42
-2025-06-11 20:43:15.666 | INFO     | __main__:main:608 - Shuffling data with seed 42
-/home/rtx3090/miniconda3/envs/loro_2by4/lib/python3.8/site-packages/transformers/generation/configuration_utils.py:568: UserWarning: `pad_token_id` should be positive but got -1. This will cause errors when batch generating, if there is padding. Please set `pad_token_id` explicitly as `model.generation_config.pad_token_id=PAD_TOKEN_ID` to avoid errors in generation
-  warnings.warn(
-runname= 0611_204317_gc0.0_step20000_model130m_ar256_lotyloro_fr500_ls_-1_sccosine_restart_crfr500_as-2000_raall_rf500_sc_all_ini_xavier_op_loro_adamw_mlr0.1_lr0.001_bs64_tbs512_severy_1000_eevery_1000_2by4True_a2by4False_m2by4True_saveTrue
-wandb: Currently logged in as: ljx923721867 (ljx923721867-university-of-surrey) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
-wandb: Tracking run with wandb version 0.20.0
-wandb: Run data is saved locally in /home/rtx3090/code_jiaxi/LORO-main/wandb/run-20250611_204317-zztv7jxs
-wandb: Run `wandb offline` to turn off syncing.
-wandb: Syncing run 0611_204317_gc0.0_step20000_model130m_ar256_lotyloro_fr500_ls_-1_sccosine_restart_crfr500_as-2000_raall_rf500_sc_all_ini_xavier_op_loro_adamw_mlr0.1_lr0.001_bs64_tbs512_severy_1000_eevery_1000_2by4True_a2by4False_m2by4True_saveTrue
-wandb:  View project at https://wandb.ai/ljx923721867-university-of-surrey/2by4
-wandb:  View run at https://wandb.ai/ljx923721867-university-of-surrey/2by4/runs/zztv7jxs
-wandb: WARNING Saving files without folders. If you want to preserve subdirectories pass base_path to wandb.save, i.e. wandb.save("/mnt/folder/file.h5", base_path="/mnt")
-Update steps:   0%|                                   | 0/20000 [00:00<?, ?it/s]2025-06-11 20:43:18.465 | INFO     | __main__:main:886 - 🔧 Step 1: Applying LORO low-rank parameterization...
-2025-06-11 20:43:18.465 | INFO     | __main__:main:886 - 🔧 Step 1: Applying LORO low-rank parameterization...
-layer.0.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.0.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.0.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.0.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.0.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.0.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.0.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.1.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.1.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.1.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.1.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.1.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.1.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.1.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.2.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.2.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.2.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.2.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.2.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.2.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.2.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.3.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.3.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.3.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.3.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.3.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.3.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.3.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.4.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.4.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.4.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.4.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.4.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.4.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.4.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.5.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.5.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.5.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.5.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.5.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.5.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.5.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.6.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.6.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.6.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.6.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.6.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.6.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.6.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.7.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.7.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.7.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.7.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.7.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.7.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.7.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.8.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.8.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.8.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.8.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.8.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.8.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.8.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.9.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.9.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.9.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.9.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.9.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.9.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.9.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.10.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.10.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.10.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.10.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.10.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.10.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.10.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.11.self_attn.q_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.11.self_attn.k_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.11.self_attn.v_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.11.self_attn.o_proj: Linear(in_features=768, out_features=768, bias=False) --> LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-layer.11.mlp.gate_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-layer.11.mlp.down_proj: Linear(in_features=2048, out_features=768, bias=False) --> LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-layer.11.mlp.up_proj: Linear(in_features=768, out_features=2048, bias=False) --> LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-
-LowRankLinear modules are set successfully!
-Self-attention rank: 256, MLP rank: 256.
-Full param: 134.105856 M = 0.134105856 G
-Low-rank param: 93.997824 M = 0.093997824 G
-Cprs rate: 70.09226%
-
-2025-06-11 20:43:25.363 | INFO     | __main__:main:896 - ✅ LORO low-rank parameterization applied successfully!
-2025-06-11 20:43:25.363 | INFO     | __main__:main:896 - ✅ LORO low-rank parameterization applied successfully!
-2025-06-11 20:43:25.363 | INFO     | __main__:main:902 - 🔧 Step 2: Applying 2:4 sparse parameterization on LORO parameters...
-2025-06-11 20:43:25.363 | INFO     | __main__:main:902 - 🔧 Step 2: Applying 2:4 sparse parameterization on LORO parameters...
-2025-06-11 20:43:25.363 | INFO     | __main__:main:918 - 📌 将对MLP模块应用2:4稀疏: ['gate_proj', 'up_proj', 'down_proj']
-2025-06-11 20:43:25.363 | INFO     | __main__:main:918 - 📌 将对MLP模块应用2:4稀疏: ['gate_proj', 'up_proj', 'down_proj']
-2025-06-11 20:43:25.364 | INFO     | __main__:main:923 - 🎯 最终目标模块列表: ['gate_proj', 'up_proj', 'down_proj']
-2025-06-11 20:43:25.364 | INFO     | __main__:main:923 - 🎯 最终目标模块列表: ['gate_proj', 'up_proj', 'down_proj']
-🔧 Applied sparse overlay to: model.layers.0.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.0.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.0.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.1.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.1.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.1.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.2.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.2.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.2.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.3.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.3.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.3.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.4.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.4.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.4.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.5.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.5.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.5.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.6.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.6.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.6.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.7.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.7.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.7.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.8.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.8.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.8.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.9.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.9.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.9.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.10.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.10.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.10.mlp.up_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.11.mlp.gate_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.11.mlp.down_proj (scale will be computed on first forward pass)
-🔧 Applied sparse overlay to: model.layers.11.mlp.up_proj (scale will be computed on first forward pass)
-✅ Sparse overlay applied to 36/36 LORO modules
-2025-06-11 20:43:25.371 | INFO     | __main__:main:931 - ✅ 2:4 sparse overlay applied on LORO parameters!
-2025-06-11 20:43:25.371 | INFO     | __main__:main:931 - ✅ 2:4 sparse overlay applied on LORO parameters!
-2025-06-11 20:43:25.372 | INFO     | __main__:main:938 - 📊 Sparse scale parameters are fixed (not learnable) - computed once and then kept constant
-2025-06-11 20:43:25.372 | INFO     | __main__:main:938 - 📊 Sparse scale parameters are fixed (not learnable) - computed once and then kept constant
-/home/rtx3090/code_jiaxi/LORO-main/loro_torch/loro_optim.py:217: FutureWarning: This implementation of AdamW is deprecated and will be removed in a future version. Use the PyTorch implementation torch.optim.AdamW instead, or set `no_deprecation_warning=True` to disable this warning
-  warnings.warn(
-2025-06-11 20:43:25.374 | INFO     | __main__:main:951 - 
-LlamaForCausalLM(
-  (model): LlamaModel(
-    (embed_tokens): Embedding(32000, 768, padding_idx=31999)
-    (layers): ModuleList(
-      (0-11): 12 x LlamaDecoderLayer(
-        (self_attn): LlamaAttention(
-          (q_proj): LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-          (k_proj): LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-          (v_proj): LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-          (o_proj): LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-          (rotary_emb): LlamaRotaryEmbedding()
-        )
-        (mlp): LlamaMLP(
-          (gate_proj): SparseOverlayLinear(
-            (loro_linear): LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-          )
-          (down_proj): SparseOverlayLinear(
-            (loro_linear): LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-          )
-          (up_proj): SparseOverlayLinear(
-            (loro_linear): LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-          )
-          (act_fn): SiLU()
-        )
-        (input_layernorm): LlamaRMSNorm()
-        (post_attention_layernorm): LlamaRMSNorm()
-      )
-    )
-    (norm): LlamaRMSNorm()
-  )
-  (lm_head): Linear(in_features=768, out_features=32000, bias=False)
-)
-
-2025-06-11 20:43:25.374 | INFO     | __main__:main:951 - 
-LlamaForCausalLM(
-  (model): LlamaModel(
-    (embed_tokens): Embedding(32000, 768, padding_idx=31999)
-    (layers): ModuleList(
-      (0-11): 12 x LlamaDecoderLayer(
-        (self_attn): LlamaAttention(
-          (q_proj): LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-          (k_proj): LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-          (v_proj): LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-          (o_proj): LowRankLinear(in_dim=768, out_dim=768, rank=256, init=xavier)
-          (rotary_emb): LlamaRotaryEmbedding()
-        )
-        (mlp): LlamaMLP(
-          (gate_proj): SparseOverlayLinear(
-            (loro_linear): LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-          )
-          (down_proj): SparseOverlayLinear(
-            (loro_linear): LowRankLinear(in_dim=2048, out_dim=768, rank=256, init=xavier)
-          )
-          (up_proj): SparseOverlayLinear(
-            (loro_linear): LowRankLinear(in_dim=768, out_dim=2048, rank=256, init=xavier)
-          )
-          (act_fn): SiLU()
-        )
-        (input_layernorm): LlamaRMSNorm()
-        (post_attention_layernorm): LlamaRMSNorm()
-      )
-    )
-    (norm): LlamaRMSNorm()
-  )
-  (lm_head): Linear(in_features=768, out_features=32000, bias=False)
-)
-
-2025-06-11 20:43:25.375 | INFO     | __main__:main:952 - Total params: 94.00M
-2025-06-11 20:43:25.375 | INFO     | __main__:main:952 - Total params: 94.00M
-2025-06-11 20:43:25.376 | INFO     | __main__:main:955 - Trainable params: 94.00M
-2025-06-11 20:43:25.376 | INFO     | __main__:main:955 - Trainable params: 94.00M
-2025-06-11 20:43:25.376 | INFO     | __main__:main:958 - Saving model to /home/rtx3090/code_jiaxi/LORO-main/ckpt every 1000 update steps
-2025-06-11 20:43:25.376 | INFO     | __main__:main:958 - Saving model to /home/rtx3090/code_jiaxi/LORO-main/ckpt every 1000 update steps
-Update steps:   0%|                       | 1/20000 [00:33<186:35:47, 33.59s/it]/home/rtx3090/miniconda3/envs/loro_2by4/lib/python3.8/site-packages/torch/cuda/memory.py:329: FutureWarning: torch.cuda.reset_max_memory_allocated now calls torch.cuda.reset_peak_memory_stats, which resets /all/ peak memory stats.
-  warnings.warn(
-Iter = 1, global step = 8, Total loss = 10.5625, lr = 0.0001, Time = 28.071218252182007 sec, max_memory_GB = 15.27
-Update steps:   0%|                        | 2/20000 [00:39<96:12:17, 17.32s/it]Iter = 2, global step = 16, Total loss = 10.5, lr = 0.00010043492315519647, Time = 5.874624252319336 sec, max_memory_GB = 15.62
-Update steps:   0%|                        | 3/20000 [00:45<67:10:59, 12.09s/it]Iter = 3, global step = 24, Total loss = 10.4375, lr = 0.00010086984631039297, Time = 5.8485589027404785 sec, max_memory_GB = 15.62
-Update steps:   0%|                        | 4/20000 [00:51<53:28:38,  9.63s/it]Iter = 4, global step = 32, Total loss = 10.375, lr = 0.00010130476946558943, Time = 5.842482566833496 sec, max_memory_GB = 15.62
-Update steps:   0%|                        | 5/20000 [00:57<45:56:46,  8.27s/it]Iter = 5, global step = 40, Total loss = 10.375, lr = 0.00010173969262078592, Time = 5.881180286407471 sec, max_memory_GB = 15.62
-Update steps:   0%|                        | 6/20000 [01:02<41:25:39,  7.46s/it]Iter = 6, global step = 48, Total loss = 10.3125, lr = 0.00010217461577598238, Time = 5.876023292541504 sec, max_memory_GB = 15.62
-Update steps:   0%|                        | 7/20000 [01:08<38:32:34,  6.94s/it]Iter = 7, global step = 56, Total loss = 10.25, lr = 0.00010260953893117888, Time = 5.874562978744507 sec, max_memory_GB = 15.62
-Update steps:   0%|                        | 8/20000 [01:14<36:40:02,  6.60s/it]Iter = 8, global step = 64, Total loss = 10.125, lr = 0.00010304446208637535, Time = 5.869614124298096 sec, max_memory_GB = 15.62
-Update steps:   0%|                        | 9/20000 [01:20<35:24:08,  6.38s/it]Iter = 9, global step = 72, Total loss = 10.0625, lr = 0.00010347938524157183, Time = 5.874802589416504 sec, max_memory_GB = 15.62
-Update steps:   0%|                       | 10/20000 [01:26<34:32:48,  6.22s/it]Update steps:   0%|                       | 11/20000 [01:32<33:57:16,  6.12s/it]Update steps:   0%|                       | 12/20000 [01:38<33:33:06,  6.04s/it]Update steps:   0%|                       | 13/20000 [01:44<33:16:26,  5.99s/it]Update steps:   0%|                       | 14/20000 [01:50<33:05:59,  5.96s/it]Update steps:   0%|                       | 15/20000 [01:55<32:58:38,  5.94s/it]Update steps:   0%|                       | 16/20000 [02:01<32:52:59,  5.92s/it]Update steps:   0%|                       | 17/20000 [02:07<32:48:17,  5.91s/it]Update steps:   0%|                       | 18/20000 [02:13<32:45:58,  5.90s/it]Update steps:   0%|                       | 19/20000 [02:19<32:43:43,  5.90s/it]Update steps:   0%|                       | 20/20000 [02:25<32:44:23,  5.90s/it]Update steps:   0%|                       | 21/20000 [02:31<32:42:18,  5.89s/it]Update steps:   0%|                       | 22/20000 [02:37<32:41:56,  5.89s/it]Update steps:   0%|                       | 23/20000 [02:43<32:42:56,  5.90s/it]Update steps:   0%|                       | 24/20000 [02:48<32:43:09,  5.90s/it]📈 Step 200: Loss = 8.5000
-
-🔧 Model Weights Health Check at Step 200
-✅ All weights are healthy
-Update steps:   0%|                       | 25/20000 [02:54<32:45:10,  5.90s/it]Update steps:   0%|                       | 26/20000 [03:00<32:44:01,  5.90s/it]Update steps:   0%|                       | 27/20000 [03:06<32:42:18,  5.89s/it]Update steps:   0%|                       | 28/20000 [03:12<32:42:29,  5.90s/it]Update steps:   0%|                       | 29/20000 [03:18<32:42:39,  5.90s/it]Update steps:   0%|                       | 30/20000 [03:24<32:42:08,  5.90s/it]Update steps:   0%|                       | 31/20000 [03:30<32:42:22,  5.90s/it]Update steps:   0%|                       | 32/20000 [03:36<32:43:27,  5.90s/it]Update steps:   0%|                       | 33/20000 [03:42<33:15:02,  6.00s/it]Update steps:   0%|                       | 34/20000 [03:48<33:05:44,  5.97s/it]Update steps:   0%|                       | 35/20000 [03:54<32:58:04,  5.94s/it]Update steps:   0%|                       | 36/20000 [04:00<32:54:00,  5.93s/it]Update steps:   0%|                       | 37/20000 [04:05<32:50:27,  5.92s/it]Update steps:   0%|                       | 38/20000 [04:11<32:47:14,  5.91s/it]Update steps:   0%|                       | 39/20000 [04:17<32:46:01,  5.91s/it]Update steps:   0%|                       | 40/20000 [04:23<32:45:28,  5.91s/it]Update steps:   0%|                       | 41/20000 [04:29<32:44:35,  5.91s/it]Update steps:   0%|                       | 42/20000 [04:35<32:44:16,  5.91s/it]Update steps:   0%|                       | 43/20000 [04:41<32:44:14,  5.91s/it]Update steps:   0%|                       | 44/20000 [04:47<32:44:06,  5.91s/it]Update steps:   0%|                       | 45/20000 [04:53<32:43:03,  5.90s/it]Update steps:   0%|                       | 46/20000 [04:59<32:44:18,  5.91s/it]Update steps:   0%|                       | 47/20000 [05:04<32:42:58,  5.90s/it]Update steps:   0%|                       | 48/20000 [05:10<32:43:00,  5.90s/it]Update steps:   0%|                       | 49/20000 [05:16<32:43:50,  5.91s/it]📈 Step 400: Loss = 7.4062
-🚨 Large loss change: -1.0938
-
-🔧 Model Weights Health Check at Step 400
-✅ All weights are healthy
-Update steps:   0%|                       | 50/20000 [05:22<33:15:03,  6.00s/it]Update steps:   0%|                       | 51/20000 [05:28<33:05:43,  5.97s/it]Update steps:   0%|                       | 52/20000 [05:34<32:58:18,  5.95s/it]Update steps:   0%|                       | 53/20000 [05:40<32:53:21,  5.94s/it]Update steps:   0%|                       | 54/20000 [05:46<32:50:22,  5.93s/it]Update steps:   0%|                       | 55/20000 [05:52<32:47:20,  5.92s/it]Update steps:   0%|                       | 56/20000 [05:58<32:49:28,  5.93s/it]Update steps:   0%|                       | 57/20000 [06:04<32:46:16,  5.92s/it]Update steps:   0%|                       | 58/20000 [06:10<32:44:59,  5.91s/it]Update steps:   0%|                       | 59/20000 [06:16<32:44:50,  5.91s/it]Update steps:   0%|                       | 60/20000 [06:22<32:43:37,  5.91s/it]Update steps:   0%|                       | 61/20000 [06:27<32:44:46,  5.91s/it]Update steps:   0%|                       | 62/20000 [06:33<32:43:29,  5.91s/it]Update steps:   0%|                       | 63/20000 [06:39<32:42:28,  5.91s/it]Update steps:   0%|                       | 64/20000 [06:45<32:42:11,  5.91s/it]Update steps:   0%|                       | 65/20000 [06:51<32:42:07,  5.91s/it]Update steps:   0%|                       | 66/20000 [06:57<33:19:06,  6.02s/it]Update steps:   0%|                       | 67/20000 [07:03<33:09:13,  5.99s/it]Update steps:   0%|                       | 68/20000 [07:09<33:01:53,  5.97s/it]Update steps:   0%|                       | 69/20000 [07:15<32:56:53,  5.95s/it]Update steps:   0%|                       | 70/20000 [07:21<32:53:18,  5.94s/it]Update steps:   0%|                       | 71/20000 [07:27<32:50:28,  5.93s/it]
