@@ -430,50 +430,193 @@ class SparseOverlayLinear(nn.Module):
 def apply_sparse_overlay_on_loro(
     model: nn.Module,
     sparse_init_scale: float = 1.0,
-    target_modules: Optional[List[str]] = None
-) -> None:
+    target_modules: Optional[List[str]] = None,
+) -> nn.Module:
     """
-    Apply 2:4 sparse overlay on existing LORO parameters
+    Apply 2:4 sparse overlay on LORO low-rank parameters
     
     Args:
         model: Model with LORO parameters already applied
-        sparse_init_scale: Initial scale for sparse weights
-        target_modules: List of module names to apply sparse overlay to
+        sparse_init_scale: Initial scale factor for sparse weights
+        target_modules: List of module names to apply sparsity to
+        
+    Returns:
+        Model with sparse overlay applied to LORO parameters
     """
     if target_modules is None:
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     
-    replaced_modules = 0
-    total_modules = 0
+    replaced_count = 0
     
     for name, module in model.named_modules():
-        # Check if this is a LORO linear layer
-        if (hasattr(module, 'weight_in') and hasattr(module, 'weight_out') and 
-            any(target_name in name for target_name in target_modules)):
+        if not isinstance(module, nn.Linear):
+            continue
             
-            total_modules += 1
+        # Check if this module should be sparsified
+        module_name = name.split('.')[-1]  # Get just the module name (e.g., "q_proj")
+        if module_name not in target_modules:
+            continue
             
-            # Get parent module and child name
-            parent = model
-            components = name.split('.')
-            for component in components[:-1]:
-                parent = getattr(parent, component)
-            child_name = components[-1]
+        # Check if module has LORO low-rank parameters
+        if not (hasattr(module, 'lora_A') and hasattr(module, 'lora_B')):
+            continue
             
-            # Create sparse overlay
-            sparse_overlay = SparseOverlayLinear(module, sparse_init_scale)
-            
-            # Replace the module
-            setattr(parent, child_name, sparse_overlay)
-            replaced_modules += 1
-            
-            print(f"🔧 Applied sparse overlay to: {name} (scale will be computed on first forward pass)")
+        print(f"Applying sparse overlay to LORO module: {name}")
+        
+        # Apply sparse overlay to both lora_A and lora_B
+        sparse_A = SparseOverlayFunction.apply(module.lora_A, sparse_init_scale)
+        sparse_B = SparseOverlayFunction.apply(module.lora_B, sparse_init_scale)
+        
+        # Replace the parameters
+        module.lora_A = nn.Parameter(sparse_A)
+        module.lora_B = nn.Parameter(sparse_B)
+        
+        # Add sparse scale buffers (these are fixed, not learnable)
+        module.register_buffer('sparse_scale_A', torch.tensor(sparse_init_scale, device=module.lora_A.device))
+        module.register_buffer('sparse_scale_B', torch.tensor(sparse_init_scale, device=module.lora_B.device))
+        
+        # Add flip rate tracking attributes
+        module.register_buffer('previous_mask_A', None)
+        module.register_buffer('previous_mask_B', None)
+        module._flip_rate_enabled_A = False
+        module._flip_rate_enabled_B = False
+        module._first_mask_recorded_A = False
+        module._first_mask_recorded_B = False
+        
+        replaced_count += 1
     
-    print(f"✅ Sparse overlay applied to {replaced_modules}/{total_modules} LORO modules")
+    print(f"Applied sparse overlay to {replaced_count} LORO modules")
+    return model
+
+
+def enable_flip_rate_tracking_for_sparse_overlay(model: nn.Module, enabled: bool = True):
+    """
+    Enable flip rate tracking for LORO modules with sparse overlay
     
-    if replaced_modules == 0:
-        print("❌ Warning: No LORO modules found to apply sparse overlay!")
-        print("   Make sure LORO parameterization is applied first.")
+    Args:
+        model: Model with LORO sparse overlay modules
+        enabled: Whether to enable flip rate tracking
+    """
+    count = 0
+    for name, module in model.named_modules():
+        if (isinstance(module, nn.Linear) and 
+            hasattr(module, 'lora_A') and hasattr(module, 'lora_B') and
+            hasattr(module, 'sparse_scale_A') and hasattr(module, 'sparse_scale_B')):
+            
+            module._flip_rate_enabled_A = enabled
+            module._flip_rate_enabled_B = enabled
+            if not enabled:
+                module.previous_mask_A = None
+                module.previous_mask_B = None
+                module._first_mask_recorded_A = False
+                module._first_mask_recorded_B = False
+            count += 1
+    
+    print(f"{'启用' if enabled else '禁用'} {count} 个LORO SparseOverlay模块的flip rate跟踪")
+
+
+def _calculate_module_flip_rate(module: nn.Module, matrix_type: str) -> tuple:
+    """
+    Calculate flip rate for a specific matrix (A or B) in a LORO module
+    
+    Args:
+        module: LORO module with sparse overlay
+        matrix_type: 'A' or 'B' to specify which matrix
+        
+    Returns:
+        tuple: (flip_rate, changed_elements, total_elements)
+    """
+    if matrix_type not in ['A', 'B']:
+        return 0.0, 0, 0
+    
+    # Get the appropriate attributes
+    enabled_attr = f'_flip_rate_enabled_{matrix_type}'
+    mask_attr = f'previous_mask_{matrix_type}'
+    recorded_attr = f'_first_mask_recorded_{matrix_type}'
+    param_attr = f'lora_{matrix_type}'
+    scale_attr = f'sparse_scale_{matrix_type}'
+    
+    if not getattr(module, enabled_attr, False):
+        return 0.0, 0, 0
+    
+    # Get current sparse weights and mask
+    current_weights = getattr(module, param_attr)
+    sparse_scale = getattr(module, scale_attr)
+    
+    # Apply soft threshold to get current sparse weights
+    current_sparse_weights = SparseOverlayFunction.apply(current_weights, sparse_scale)
+    current_mask = (current_sparse_weights != 0.0).float()
+    
+    previous_mask = getattr(module, mask_attr, None)
+    first_recorded = getattr(module, recorded_attr, False)
+    
+    if previous_mask is None or not first_recorded:
+        # First time recording, store current mask
+        setattr(module, mask_attr, current_mask.clone())
+        setattr(module, recorded_attr, True)
+        return 0.0, 0, current_mask.numel()
+    
+    # Calculate mask changes
+    mask_diff = (current_mask != previous_mask).float()
+    total_elements = mask_diff.numel()
+    changed_elements = int(mask_diff.sum().item())
+    
+    flip_rate = changed_elements / total_elements if total_elements > 0 else 0.0
+    
+    # Update previous mask
+    setattr(module, mask_attr, current_mask.clone())
+    
+    return flip_rate, changed_elements, total_elements
+
+
+def calculate_sparse_overlay_flip_rate(model: nn.Module) -> dict:
+    """
+    Calculate flip rate for LORO modules with sparse overlay
+    
+    Args:
+        model: Model with LORO sparse overlay modules
+        
+    Returns:
+        dict: Flip rate statistics
+    """
+    flip_rates = {}
+    all_flip_rates = []
+    total_changed_elements = 0
+    total_elements = 0
+    
+    for name, module in model.named_modules():
+        if (isinstance(module, nn.Linear) and 
+            hasattr(module, 'lora_A') and hasattr(module, 'lora_B') and
+            hasattr(module, 'sparse_scale_A') and hasattr(module, 'sparse_scale_B')):
+            
+            # Calculate flip rate for both A and B matrices
+            flip_rate_A, changed_A, elements_A = _calculate_module_flip_rate(module, 'A')
+            flip_rate_B, changed_B, elements_B = _calculate_module_flip_rate(module, 'B')
+            
+            # Store individual flip rates
+            flip_rates[f"flip_rate/{name}_A"] = flip_rate_A
+            flip_rates[f"flip_rate/{name}_B"] = flip_rate_B
+            
+            # Add to overall statistics
+            all_flip_rates.extend([flip_rate_A, flip_rate_B])
+            total_changed_elements += changed_A + changed_B
+            total_elements += elements_A + elements_B
+    
+    # Calculate overall statistics
+    if all_flip_rates:
+        flip_rates["flip_rate/mean"] = sum(all_flip_rates) / len(all_flip_rates)
+        flip_rates["flip_rate/max"] = max(all_flip_rates)
+        flip_rates["flip_rate/min"] = min(all_flip_rates)
+        
+        # 计算总体flip rate（所有层所有矩阵元素累加）
+        flip_rates["flip_rate/total"] = total_changed_elements / total_elements if total_elements > 0 else 0.0
+    else:
+        flip_rates["flip_rate/mean"] = 0.0
+        flip_rates["flip_rate/max"] = 0.0
+        flip_rates["flip_rate/min"] = 0.0
+        flip_rates["flip_rate/total"] = 0.0
+    
+    return flip_rates
 
 
 def get_sparse_overlay_parameters(model: nn.Module):

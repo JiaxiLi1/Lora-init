@@ -18,6 +18,11 @@ from typing import Optional, List
 from sparse import matmul, MVUE24_approx_triton, soft_threshold24_triton
 
 
+def calculate_mask_from_sparse_weights(sparse_weights):
+    """从稀疏权重计算mask"""
+    return (sparse_weights != 0.0).float()
+
+
 def fake_fp8_mm(a, b, dtype):
     """EXACT copy of fake_fp8_mm from 2by4-pretrain-acc-examples/v2/nanoGPT/sparse_ops.py"""
     # Store original dtypes for potential conversion back
@@ -102,11 +107,25 @@ class Sparse2to4Linear(nn.Linear):
     Using the exact same implementation as the working reference code.
     
     CRITICAL FIX: Delays Triton kernel calls to avoid multiprocessing serialization issues.
+    
+    Added: Flip Rate calculation to track mask changes during training.
     """
     def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None):
         super(Sparse2to4Linear, self).__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
         self.register_buffer('scale', torch.tensor(0.))
         self._scale_initialized = False
+        
+        # Flip rate tracking buffers
+        self.register_buffer('previous_mask', None)
+        self._flip_rate_enabled = False
+        self._first_mask_recorded = False
+
+    def enable_flip_rate_tracking(self, enabled=True):
+        """启用或禁用flip rate跟踪"""
+        self._flip_rate_enabled = enabled
+        if not enabled:
+            self.previous_mask = None
+            self._first_mask_recorded = False
 
     def get_sparse_weights(self):
         # CRITICAL: Only call Triton kernels when actually needed (in forward pass)
@@ -114,6 +133,38 @@ class Sparse2to4Linear(nn.Linear):
         if not self._scale_initialized:
             self._lazy_init_scale()
         return SoftThreshold.apply(self.weight, self.scale)
+
+    def calculate_flip_rate(self):
+        """
+        计算当前mask与上一次mask的flip rate
+        
+        Returns:
+            tuple: (flip_rate, changed_elements, total_elements)
+        """
+        if not self._flip_rate_enabled:
+            return 0.0, 0, 0
+            
+        # 获取当前sparse权重和mask
+        current_sparse_weights = self.get_sparse_weights()
+        current_mask = calculate_mask_from_sparse_weights(current_sparse_weights)
+        
+        if self.previous_mask is None or not self._first_mask_recorded:
+            # 第一次记录，没有previous mask可以比较
+            self.previous_mask = current_mask.clone()
+            self._first_mask_recorded = True
+            return 0.0, 0, current_mask.numel()
+        
+        # 计算mask变化
+        mask_diff = (current_mask != self.previous_mask).float()
+        total_elements = mask_diff.numel()
+        changed_elements = int(mask_diff.sum().item())
+        
+        flip_rate = changed_elements / total_elements if total_elements > 0 else 0.0
+        
+        # 更新previous mask
+        self.previous_mask = current_mask.clone()
+        
+        return flip_rate, changed_elements, total_elements
 
     @torch.no_grad()
     def _lazy_init_scale(self):
@@ -203,16 +254,74 @@ def apply_sparse2to4_to_model(
                 # Replace the module
                 setattr(module, child_name, sparse_linear)
                 replaced_count += 1
-                print(f"✅ Replaced {name}.{child_name} with Sparse2to4Linear")
+                print(f"Replaced {name}.{child_name} with Sparse2to4Linear")
     
-    # CRITICAL CHANGE: Do NOT initialize scales here!
-    # Scales will be initialized lazily in the first forward pass
-    # This avoids Triton kernel calls during model setup, preventing multiprocessing issues
+    if replaced_count == 0:
+        print("⚠️  No Linear modules were replaced. Check your target_modules list.")
+    else:
+        print(f"✅ Successfully replaced {replaced_count} Linear modules with Sparse2to4Linear")
     
-    print(f"🎯 Total replaced modules: {replaced_count}")
-    print(f"🔧 Scales will be initialized lazily during first forward pass")
-    print(f"🚀 Ready for DataLoader multiprocessing without segmentation faults!")
     return model
+
+
+def enable_flip_rate_tracking_for_model(model: nn.Module, enabled: bool = True):
+    """
+    为模型中所有的Sparse2to4Linear模块启用或禁用flip rate跟踪
+    
+    Args:
+        model: 包含Sparse2to4Linear模块的模型
+        enabled: 是否启用flip rate跟踪
+    """
+    count = 0
+    for name, module in model.named_modules():
+        if isinstance(module, Sparse2to4Linear):
+            module.enable_flip_rate_tracking(enabled)
+            count += 1
+    
+    print(f"{'启用' if enabled else '禁用'} {count} 个Sparse2to4Linear模块的flip rate跟踪")
+
+
+def calculate_model_flip_rate(model: nn.Module) -> dict:
+    """
+    计算模型中所有Sparse2to4Linear模块的flip rate
+    
+    Args:
+        model: 包含Sparse2to4Linear模块的模型
+        
+    Returns:
+        dict: 包含各层flip rate和总体统计的字典
+    """
+    flip_rates = {}
+    all_flip_rates = []
+    total_changed_elements = 0
+    total_elements = 0
+    
+    for name, module in model.named_modules():
+        if isinstance(module, Sparse2to4Linear):
+            flip_rate, changed_elements, elements = module.calculate_flip_rate()
+            flip_rates[f"flip_rate/{name}"] = flip_rate
+            all_flip_rates.append(flip_rate)
+            
+            # 累加所有层的元素数用于计算总体flip rate
+            total_changed_elements += changed_elements
+            total_elements += elements
+    
+    # 计算总体统计
+    if all_flip_rates:
+        flip_rates["flip_rate/mean"] = sum(all_flip_rates) / len(all_flip_rates)
+        flip_rates["flip_rate/max"] = max(all_flip_rates)
+        flip_rates["flip_rate/min"] = min(all_flip_rates)
+        
+        # 计算总体flip rate（所有层元素累加）
+        flip_rates["flip_rate/total"] = total_changed_elements / total_elements if total_elements > 0 else 0.0
+    else:
+        # 没有Sparse2to4Linear模块时返回0
+        flip_rates["flip_rate/mean"] = 0.0
+        flip_rates["flip_rate/max"] = 0.0
+        flip_rates["flip_rate/min"] = 0.0
+        flip_rates["flip_rate/total"] = 0.0
+    
+    return flip_rates
 
 
 def test_sparse2to4_linear():

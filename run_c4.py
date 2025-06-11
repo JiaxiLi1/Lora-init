@@ -34,6 +34,12 @@ from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor
 
 from loro_torch.loro_optim import LOROAdamW
 
+from sparse_fullrank_linear import (
+    apply_sparse2to4_to_model, 
+    enable_flip_rate_tracking_for_model,
+    calculate_model_flip_rate
+)
+
 transformers.logging.set_verbosity_error()
 
 def extract_size_and_type(config_path):
@@ -64,6 +70,11 @@ def str_to_bool(value):
 def parse_args():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument(
+        "--flip_rate",
+        type=str_to_bool, default=False,
+        help="Enable flip rate calculation and logging to track mask stability in 2:4 sparse training."
+    )
     parser.add_argument("--attn_2by4", type=str_to_bool, default=False)
     parser.add_argument("--mlp_2by4", type=str_to_bool, default=True)
     parser.add_argument(
@@ -213,6 +224,7 @@ def parse_args():
 
     # disable ddp, single_gpu
     parser.add_argument("--single_gpu", default=False, action="store_true")
+
 
     args = parser.parse_args()
 
@@ -1091,17 +1103,25 @@ def main(args):
     df_train_all = pd.DataFrame([])
     df_eval_all = pd.DataFrame([])
 
-    # if global_rank == 0:  # 只在主进程上运行
-    #     logger.info("测量初始推理速度...")
-    #     inference_stats = measure_inference_speed(model, dataloader, tokenizer, device)
-    #     logger.info(f"初始推理速度: {inference_stats['tokens_per_second']:.2f} 令牌/秒")
-    #
-    #     # 记录到wandb
-    #     wandb.log({
-    #         "initial_inference_speed": inference_stats['tokens_per_second'],
-    #         "initial_inference_batches": inference_stats['batches_processed'],
-    #         "initial_inference_tokens": inference_stats['total_tokens']
-    #     }, step=0)
+    # 启用flip rate跟踪（如果请求）
+    if args.flip_rate:
+        if hasattr(args, 'enable_2to4_sparse') and args.enable_2to4_sparse:
+            logger.info("🔧 启用flip rate跟踪...")
+            # For pure Sparse2to4Linear (full-rank + 2:4 sparse mode)
+            enable_flip_rate_tracking_for_model(model, enabled=True)
+            logger.info("✅ Flip rate tracking enabled for Sparse2to4Linear modules")
+            
+            # Also enable for LORO + 2:4 sparse combination if applicable
+            try:
+                from loro_torch.sparse_overlay import enable_flip_rate_tracking_for_sparse_overlay
+                enable_flip_rate_tracking_for_sparse_overlay(model, enabled=True)
+                logger.info("✅ Flip rate tracking also enabled for LORO SparseOverlay modules")
+            except ImportError:
+                pass  # LORO sparse overlay functions may not be available
+        else:
+            logger.warning("⚠️ Flip rate requested but no 2:4 sparse training enabled. Flip rate will be 0.")
+    else:
+        logger.info("ℹ️ Flip rate tracking disabled")
 
     for batch_idx, batch in enumerate(dataloader):
 
@@ -1322,33 +1342,24 @@ def main(args):
                 print(f"✅ HEALTH CHECK @ step {update_step}: {param_health}")
 
         # save checkpoint by save_every
-        if (
-            local_step > args.gradient_accumulation
-            and update_step % args.save_every == 0
-            and global_rank == 0
-        ):
-            if args.save_ckpt:
-                current_model_directory = f"{args.save_dir}/{runname}/model_{update_step}"
+        if update_step % args.save_every == 0:
+            current_model_directory = f"{args.save_dir}/{runname}/model_{update_step}"
+            if global_rank == 0 and not os.path.exists(current_model_directory):
                 logger.info(
                     f"Saving model and optimizer to {current_model_directory}, update step {update_step}"
                 )
-                os.makedirs(args.save_dir, exist_ok=True)
                 os.makedirs(current_model_directory, exist_ok=True)
                 
                 # Fix generation_config pad_token_id before saving
-                model_to_save = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+                model_to_save = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
                 if hasattr(model_to_save, 'generation_config') and model_to_save.generation_config is not None:
                     if model_to_save.generation_config.pad_token_id == -1:
                         model_to_save.generation_config.pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
                 
-                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                    model.module.save_pretrained(
-                        current_model_directory, max_shard_size="100GB"
-                    )
+                if isinstance(model, nn.parallel.DistributedDataParallel):
+                    model.module.save_pretrained(current_model_directory)
                 else:
-                    model.save_pretrained(
-                        current_model_directory, max_shard_size="100GB"
-                    )
+                    model.save_pretrained(current_model_directory)
 
                 optimizer_checkpoint = {
                     "optimizer": optimizer.state_dict(),
@@ -1356,12 +1367,10 @@ def main(args):
                     "update_step": update_step,
                     "global_step": global_step,
                     "config": run_config,
-                    "wandb": wandb.run.dir,
+                    "wandb": wandb.run.dir if wandb is not None else None,
                     "dtype": args.dtype,
                 }
-                torch.save(
-                    optimizer_checkpoint, f"{current_model_directory}/optimizer.pt"
-                )
+                torch.save(optimizer_checkpoint, f"{current_model_directory}/optimizer.pt")
 
                 training_state_checkpoint = {
                     "global_step": global_step,
@@ -1376,13 +1385,78 @@ def main(args):
 
                 print(f"\nModel saved at {current_model_directory} successfully.\n")
 
-            # save wandb related info
-            if wandb is not None:
-                wandb_info = {
-                    "wandb_id": wandb.run.id,
-                }
-                with open(f"{args.save_dir}/{runname}/wandb.json", "w") as f:
-                    json.dump(wandb_info, f, indent=4)
+        # 计算tokens和batches统计信息
+        if not layer_wise_flag:
+            lr = optimizer.param_groups[0]["lr"]
+        else:
+            lr = list(optimizer_dict.values())[0].param_groups[0]["lr"]
+
+        tokens_in_update = tokens_seen - tokens_seen_before
+        tokens_seen_before = tokens_seen
+        batches_in_update = args.gradient_accumulation * world_size
+
+        # save wandb related info - 移出save_every条件，每步都记录
+        if wandb is not None:
+            wandb_dict = {
+                "global_step": global_step,
+                "update_step": update_step,
+                "loss": loss.item(),
+                "lr": lr_tmp,
+                "tokens_seen": tokens_seen,
+                "throughput_tokens": tokens_in_update / update_time,
+                "throughput_examples": args.total_batch_size / update_time,
+                "throughput_batches": batches_in_update / update_time,
+                "max_memory_GB": max_memory_GB,
+            }
+            
+            # 计算并添加flip rate指标
+            if args.flip_rate:
+                if hasattr(args, 'enable_2to4_sparse') and args.enable_2to4_sparse:
+                    # 根据优化器类型决定计算哪种flip rate
+                    if args.optimizer.lower() == "loro_adamw":
+                        # LORO + 2:4 sparse组合的flip rate
+                        try:
+                            from loro_torch.sparse_overlay import calculate_sparse_overlay_flip_rate
+                            flip_rates = calculate_sparse_overlay_flip_rate(model)
+                            wandb_dict.update(flip_rates)
+                        except ImportError:
+                            # 如果LORO sparse overlay函数不可用，返回默认值
+                            wandb_dict.update({
+                                "flip_rate/mean": 0.0,
+                                "flip_rate/max": 0.0,
+                                "flip_rate/min": 0.0,
+                                "flip_rate/total": 0.0
+                            })
+                    else:
+                        # 普通AdamW + Sparse2to4Linear模块的flip rate
+                        flip_rates = calculate_model_flip_rate(model)
+                        wandb_dict.update(flip_rates)
+                else:
+                    # 没有启用2:4稀疏训练，返回0
+                    wandb_dict.update({
+                        "flip_rate/mean": 0.0,
+                        "flip_rate/max": 0.0,
+                        "flip_rate/min": 0.0,
+                        "flip_rate/total": 0.0
+                    })
+
+            wandb.log(wandb_dict, step=global_step)
+
+            # track training stats
+            df_train_tmp = {k: [v] for k, v in wandb_dict.items()}
+            df_train_tmp["use_exact_loro"] = [use_exact_loro]
+            df_train_tmp["opt_step"] = [scheduler.last_epoch]
+            df_train_tmp["update_time"] = [update_time]
+            df_train_tmp = pd.DataFrame(df_train_tmp)
+            df_train_all = pd.concat([df_train_all, df_train_tmp], ignore_index=True)
+            df_train_all.to_csv(
+                f"{args.save_dir}/{runname}/train_stats_{args.timestamp}.csv", index=False
+            )
+
+        update_time = time.time()
+
+        # Check gradient health
+        health_status = check_gradient_health(model, global_step)
 
         # evaluation
         if update_step % args.eval_every == 0:
@@ -1423,47 +1497,6 @@ def main(args):
             )
 
             logger.info(f"Eval loss at step {update_step}: {total_loss}")
-
-        if not layer_wise_flag:
-            lr = optimizer.param_groups[0]["lr"]
-        else:
-            lr = list(optimizer_dict.values())[0].param_groups[0]["lr"]
-
-        tokens_in_update = tokens_seen - tokens_seen_before
-        tokens_seen_before = tokens_seen
-        batches_in_update = args.gradient_accumulation * world_size
-
-        # log to wandb
-        if global_rank == 0:
-            wandb_dict = {
-                "global_step": global_step,
-                "update_step": update_step,
-                "loss": loss.item(),
-                "lr": lr,
-                "tokens_seen": tokens_seen,
-                "throughput_tokens": tokens_in_update / update_time,
-                "throughput_examples": args.total_batch_size / update_time,
-                "throughput_batches": batches_in_update / update_time,
-            }
-
-            if wandb is not None:
-                wandb.log(wandb_dict, step=global_step)
-
-            # track training stats
-            df_train_tmp = {k: [v] for k, v in wandb_dict.items()}
-            df_train_tmp["use_exact_loro"] = [use_exact_loro]
-            df_train_tmp["opt_step"] = [scheduler.last_epoch]
-            df_train_tmp["update_time"] = [update_time]
-            df_train_tmp = pd.DataFrame(df_train_tmp)
-            df_train_all = pd.concat([df_train_all, df_train_tmp], ignore_index=True)
-            df_train_all.to_csv(
-                f"{args.save_dir}/{runname}/train_stats_{args.timestamp}.csv", index=False
-            )
-
-        update_time = time.time()
-
-        # Check gradient health
-        health_status = check_gradient_health(model, global_step)
 
     # ##############################
     # END of training loop
