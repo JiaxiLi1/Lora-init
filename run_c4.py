@@ -958,16 +958,34 @@ def main(args):
 
         loss = model(**batch, labels=labels).loss
         
-        # 🔍 Debug: Check loss for NaN/Inf
+        # 🔍 Enhanced NaN Detection and Early Stopping
         if torch.isnan(loss) or torch.isinf(loss):
-            print(f"❌ TRAINING: NaN/Inf loss detected at step {global_step}! Loss: {loss}")
-            # Check model parameters
+            print(f"❌ CRITICAL: NaN/Inf loss detected at step {global_step}! Loss: {loss}")
+            print(f"🛑 This indicates numerical instability. Stopping training to prevent corruption.")
+            
+            # Detailed diagnosis
             nan_params = []
+            large_params = []
             for name, param in model.named_parameters():
                 if torch.isnan(param).any():
                     nan_params.append(name)
+                elif param.abs().max() > 1e6:
+                    large_params.append((name, param.abs().max().item()))
+            
             if nan_params:
-                print(f"❌ TRAINING: Parameters with NaN: {nan_params[:5]}...")  # Show first 5
+                print(f"❌ Parameters with NaN: {nan_params[:10]}")
+            if large_params:
+                print(f"⚠️  Parameters with large values: {large_params[:5]}")
+            
+            # Save debug checkpoint
+            if global_rank == 0:
+                debug_path = os.path.join(args.save_dir, f"debug_nan_step_{global_step}")
+                os.makedirs(debug_path, exist_ok=True)
+                torch.save(model.state_dict(), os.path.join(debug_path, "model_state_with_nan.bin"))
+                print(f"💾 Debug checkpoint saved to {debug_path}")
+            
+            # Exit immediately to prevent further corruption
+            exit(1)
 
         scaled_loss = loss / args.gradient_accumulation
         scaled_loss.backward()

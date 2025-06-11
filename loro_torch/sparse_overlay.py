@@ -128,34 +128,32 @@ class SparseOverlayFunction(autograd.Function):
             
             # 🔍 Debug: Before MVUE
             if torch.isnan(input_view).any():
-                print(f"❌ BACKWARD: NaN in input_view BEFORE MVUE!")
+                print(f"❌ BACKWARD: NaN in input_view!")
             if torch.isnan(grad_output_view).any():
-                print(f"❌ BACKWARD: NaN in grad_output_view BEFORE MVUE!")
+                print(f"❌ BACKWARD: NaN in grad_output_view!")
             
-            # Apply MVUE to both input and grad_output for complete bias correction
-            # The input was computed using sparse weights, so we need to recover the "what it should have been"
-            input_mvue = MVUE24_approx_triton(input_view)
+            # 🚨 CRITICAL FIX: Apply MVUE only to grad_output.t(), not to input!
+            # Correct formula: grad_weight = MVUE(grad_output.t()) @ input
+            # The grad_output contains sparse bias from forward pass, but input is clean
+            
+            # 🚨 CRITICAL FIX: Apply MVUE only to grad_output, not to input!
+            # Correct formula: grad_weight = input.t() @ MVUE(grad_output)
+            # The grad_output contains sparse bias from forward pass, but input is clean
+            
             grad_output_mvue = MVUE24_approx_triton(grad_output_view)
             
             # 🔍 Debug: After MVUE
-            if torch.isnan(input_mvue).any():
-                print(f"❌ BACKWARD: NaN in input_mvue AFTER MVUE!")
-                print(f"   Input before MVUE had NaN: {torch.isnan(input_view).any()}")
             if torch.isnan(grad_output_mvue).any():
                 print(f"❌ BACKWARD: NaN in grad_output_mvue AFTER MVUE!")
-                print(f"   grad_output before MVUE had NaN: {torch.isnan(grad_output_view).any()}")
+                print(f"   grad_output_view before MVUE had NaN: {torch.isnan(grad_output_view).any()}")
             
             # Debug: Check MVUE effectiveness (print more frequently during debugging)
             import random
             if random.random() < 0.01:  # 1% chance to print for more debugging info
-                orig_norm = torch.norm(input_view).item()
-                mvue_norm = torch.norm(input_mvue).item()
-                ratio_input = mvue_norm/orig_norm if orig_norm > 0 else float('inf')
-                print(f"🔍 MVUE debug: input norm {orig_norm:.4f} → {mvue_norm:.4f} (ratio: {ratio_input:.4f})")
-                
                 orig_grad_norm = torch.norm(grad_output_view).item()
                 mvue_grad_norm = torch.norm(grad_output_mvue).item()
                 ratio_grad = mvue_grad_norm/orig_grad_norm if orig_grad_norm > 0 else float('inf')
+                print(f"🔍 MVUE debug: grad_output norm {orig_grad_norm:.4f} → {mvue_grad_norm:.4f} (ratio: {ratio_grad:.4f})")
                 
                 # Detailed gradient analysis when norm is very small
                 if orig_grad_norm < 1e-6:
@@ -163,17 +161,17 @@ class SparseOverlayFunction(autograd.Function):
                     grad_min = grad_output_view.abs().min().item()
                     zero_ratio = (grad_output_view == 0).float().mean().item()
                     print(f"📊 Zero grad analysis: max={grad_max:.8f}, min={grad_min:.8f}, zero_ratio={zero_ratio:.4f}")
-                
-                print(f"🔍 MVUE debug: grad_output norm {orig_grad_norm:.4f} → {mvue_grad_norm:.4f} (ratio: {ratio_grad:.4f})")
             
-            # For weight gradient: input.T @ grad_output -> (in_features, batch) @ (batch, out_features) = (in_features, out_features)
-            grad_weight = fake_fp8_mm(input_mvue.t(), grad_output_mvue, torch.float8_e5m2)
+            # 🚨 CORRECT formula: grad_weight = input.t() @ MVUE(grad_output)
+            # For forward: output = input @ weight, so grad_weight = input.t() @ grad_output
+            # But we apply MVUE to grad_output first to correct sparse bias
+            grad_weight = fake_fp8_mm(input_view.t(), grad_output_mvue, torch.float8_e5m2)
             
             # 🔍 Debug: Check final grad_weight
             if torch.isnan(grad_weight).any():
                 print(f"❌ BACKWARD: NaN in computed GRAD_WEIGHT!")
-                print(f"   input_mvue.t() has NaN: {torch.isnan(input_mvue.t()).any()}")
                 print(f"   grad_output_mvue has NaN: {torch.isnan(grad_output_mvue).any()}")
+                print(f"   input_view has NaN: {torch.isnan(input_view).any()}")
             
         if ctx.needs_input_grad[2]:
             grad_bias = grad_output.sum(0)
@@ -417,6 +415,12 @@ def test_sparse_overlay():
         except Exception as e2:
             print(f"❌ CPU fallback also failed: {e2}")
             return False
+
+
+
+
+
+
 
 
 if __name__ == "__main__":
