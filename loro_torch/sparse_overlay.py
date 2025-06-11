@@ -128,51 +128,58 @@ class SparseOverlayFunction(autograd.Function):
             
             # 🔍 Debug: Before MVUE
             if torch.isnan(input_view).any():
-                print(f"❌ BACKWARD: NaN in input_view!")
+                print(f"❌ BACKWARD: NaN in input_view BEFORE MVUE!")
             if torch.isnan(grad_output_view).any():
-                print(f"❌ BACKWARD: NaN in grad_output_view!")
+                print(f"❌ BACKWARD: NaN in grad_output_view BEFORE MVUE!")
             
-            # 🚨 CRITICAL FIX: Apply MVUE only to grad_output.t(), not to input!
-            # Correct formula: grad_weight = MVUE(grad_output.t()) @ input
-            # The grad_output contains sparse bias from forward pass, but input is clean
+            # 🔍 NEW DEBUG: Check if grad_output is essentially zero
+            grad_output_norm = torch.norm(grad_output_view).item()
+            grad_output_max = torch.max(torch.abs(grad_output_view)).item()
+            grad_output_zero_ratio = (grad_output_view.abs() < 1e-10).float().mean().item()
             
-            # 🚨 CRITICAL FIX: Apply MVUE only to grad_output, not to input!
-            # Correct formula: grad_weight = input.t() @ MVUE(grad_output)
-            # The grad_output contains sparse bias from forward pass, but input is clean
+            print(f"🔬 DETAILED DEBUG:")
+            print(f"   grad_output shape: {grad_output_view.shape}")
+            print(f"   grad_output norm: {grad_output_norm:.8f}")
+            print(f"   grad_output max abs: {grad_output_max:.8f}")
+            print(f"   grad_output zero ratio (<1e-10): {grad_output_zero_ratio:.4f}")
+            print(f"   input norm: {torch.norm(input_view).item():.8f}")
             
-            grad_output_mvue = MVUE24_approx_triton(grad_output_view)
-            
-            # 🔍 Debug: After MVUE
-            if torch.isnan(grad_output_mvue).any():
-                print(f"❌ BACKWARD: NaN in grad_output_mvue AFTER MVUE!")
-                print(f"   grad_output_view before MVUE had NaN: {torch.isnan(grad_output_view).any()}")
-            
-            # Debug: Check MVUE effectiveness (print more frequently during debugging)
-            import random
-            if random.random() < 0.01:  # 1% chance to print for more debugging info
-                orig_grad_norm = torch.norm(grad_output_view).item()
-                mvue_grad_norm = torch.norm(grad_output_mvue).item()
-                ratio_grad = mvue_grad_norm/orig_grad_norm if orig_grad_norm > 0 else float('inf')
-                print(f"🔍 MVUE debug: grad_output norm {orig_grad_norm:.4f} → {mvue_grad_norm:.4f} (ratio: {ratio_grad:.4f})")
+            # Only apply MVUE if grad_output is not all zeros
+            if grad_output_norm > 1e-12:
+                # Apply MVUE to grad_output for bias correction
+                grad_output_mvue = MVUE24_approx_triton(grad_output_view)
                 
-                # Detailed gradient analysis when norm is very small
-                if orig_grad_norm < 1e-6:
-                    grad_max = grad_output_view.abs().max().item()
-                    grad_min = grad_output_view.abs().min().item()
-                    zero_ratio = (grad_output_view == 0).float().mean().item()
-                    print(f"📊 Zero grad analysis: max={grad_max:.8f}, min={grad_min:.8f}, zero_ratio={zero_ratio:.4f}")
+                # 🔍 Debug: After MVUE
+                if torch.isnan(grad_output_mvue).any():
+                    print(f"❌ BACKWARD: NaN in grad_output_mvue AFTER MVUE!")
+                
+                # Debug: Check MVUE effectiveness (print more frequently during debugging)
+                import random
+                if random.random() < 0.01:  # 1% chance to print for more debugging info
+                    orig_grad_norm = torch.norm(grad_output_view).item()
+                    mvue_grad_norm = torch.norm(grad_output_mvue).item()
+                    ratio_grad = mvue_grad_norm/orig_grad_norm if orig_grad_norm > 0 else float('inf')
+                    print(f"🔍 MVUE debug: grad_output norm {orig_grad_norm:.4f} → {mvue_grad_norm:.4f} (ratio: {ratio_grad:.4f})")
+                    
+                    # Detailed analysis of zero gradients
+                    zero_mask = grad_output_mvue.abs() < 1e-10
+                    zero_ratio = zero_mask.float().mean().item()
+                    max_val = torch.max(grad_output_mvue.abs()).item()
+                    min_val = torch.min(grad_output_mvue.abs()).item()
+                    print(f"📊 Zero grad analysis: max={max_val:.8f}, min={min_val:.8f}, zero_ratio={zero_ratio:.4f}")
+            else:
+                print(f"⚠️  SKIPPING MVUE: grad_output norm too small ({grad_output_norm:.2e})")
+                grad_output_mvue = grad_output_view  # Skip MVUE for zero gradients
             
-            # 🚨 CORRECT formula: grad_weight = input.t() @ MVUE(grad_output)
-            # For forward: output = input @ weight, so grad_weight = input.t() @ grad_output
-            # But we apply MVUE to grad_output first to correct sparse bias
+            # Compute grad_weight using corrected formula
             grad_weight = fake_fp8_mm(input_view.t(), grad_output_mvue, torch.float8_e5m2)
             
             # 🔍 Debug: Check final grad_weight
             if torch.isnan(grad_weight).any():
                 print(f"❌ BACKWARD: NaN in computed GRAD_WEIGHT!")
+                print(f"   input_view.t() has NaN: {torch.isnan(input_view.t()).any()}")
                 print(f"   grad_output_mvue has NaN: {torch.isnan(grad_output_mvue).any()}")
-                print(f"   input_view has NaN: {torch.isnan(input_view).any()}")
-            
+        
         if ctx.needs_input_grad[2]:
             grad_bias = grad_output.sum(0)
             if torch.isnan(grad_bias).any():
