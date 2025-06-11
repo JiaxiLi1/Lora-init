@@ -794,11 +794,10 @@ def main(args):
                 logger.info(f"🎯 最终目标模块列表: {target_modules}")
                 
                 # Apply 2:4 sparsity to full-rank linear layers
-                from sparse_fullrank_linear import replace_linear_with_sparse2to4
-                model = replace_linear_with_sparse2to4(
+                from sparse_fullrank_linear import apply_sparse2to4_to_model
+                model = apply_sparse2to4_to_model(
                     model,
                     target_modules=target_modules,
-                    sparse_init_scale=args.sparse_init_scale,
                 )
                 logger.info("✅ Full-rank linear layers replaced with Sparse2to4Linear!")
                 logger.info("🔬 使用与LORO+2:4完全相同的实现: SparseOverlayFunction、MVUE、scaling等")
