@@ -199,7 +199,9 @@ class LoroSparseLinear(nn.Module):
         """Initialize parameters using standard methods"""
         # Initialize low-rank weights
         nn.init.kaiming_uniform_(self.weight_in, a=math.sqrt(5))
-        nn.init.zeros_(self.weight_out)
+        # Fix: Don't initialize weight_out to zeros! This causes gradient vanishing.
+        # Use proper initialization for low-rank decomposition
+        nn.init.kaiming_uniform_(self.weight_out, a=math.sqrt(5))
         
         # Initialize bias
         if self.bias is not None:

@@ -367,49 +367,165 @@ def measure_inference_speed(model, dataloader, tokenizer, device, num_batches=10
     }
 
 def check_gradient_health(model, step):
-    """Check gradient health and print detailed statistics"""
-    if step % 100 != 0:
-        return
+    """Enhanced gradient health check with early warning system"""
+    if step % 500 != 0:  # 🔧 REDUCED: Every 500 steps instead of 100
+        return None
         
     print(f"\n🩺 Gradient Health Check at Step {step}")
+    print("=" * 60)
     
     total_params = 0
     zero_grad_params = 0
     small_grad_params = 0
     large_grad_params = 0
+    nan_grad_params = 0
+    inf_grad_params = 0
     gradient_norms = []
+    suspicious_params = []
+    param_details = []
     
     for name, param in model.named_parameters():
         if param.grad is not None:
             grad_norm = torch.norm(param.grad).item()
+            grad_max = torch.max(torch.abs(param.grad)).item()
+            grad_min = torch.min(torch.abs(param.grad)).item()
+            
             gradient_norms.append(grad_norm)
             total_params += 1
             
+            # Check for suspicious gradients
+            has_nan = torch.isnan(param.grad).any()
+            has_inf = torch.isinf(param.grad).any()
+            
+            if has_nan:
+                nan_grad_params += 1
+                suspicious_params.append(f"NaN: {name}")
+                
+            if has_inf:
+                inf_grad_params += 1
+                suspicious_params.append(f"Inf: {name}")
+                
             if grad_norm == 0:
                 zero_grad_params += 1
-            elif grad_norm < 1e-6:
+                suspicious_params.append(f"Zero: {name}")
+            elif grad_norm < 1e-8:
                 small_grad_params += 1
-                if zero_grad_params + small_grad_params <= 5:  # Only print first few
-                    print(f"   ⚠️ Very small grad: {name}, norm={grad_norm:.2e}")
-            elif grad_norm > 1e2:
+                suspicious_params.append(f"Tiny: {name} (norm={grad_norm:.2e})")
+            elif grad_norm > 1e3:
                 large_grad_params += 1
-                if large_grad_params <= 3:  # Only print first few
-                    print(f"   ⚠️ Large grad: {name}, norm={grad_norm:.2e}")
+                suspicious_params.append(f"Large: {name} (norm={grad_norm:.2e})")
+            
+            # Store detailed info for key parameters
+            if any(key in name for key in ['weight_in', 'weight_out', 'q_proj', 'k_proj', 'v_proj']):
+                param_details.append({
+                    'name': name,
+                    'norm': grad_norm,
+                    'max': grad_max,
+                    'min': grad_min,
+                    'shape': list(param.grad.shape),
+                    'has_nan': has_nan,
+                    'has_inf': has_inf
+                })
     
+    # Calculate statistics
     if gradient_norms:
-        import numpy as np
-        avg_norm = np.mean(gradient_norms)
-        std_norm = np.std(gradient_norms)
-        max_norm = np.max(gradient_norms)
-        min_norm = np.min(gradient_norms)
+        avg_norm = sum(gradient_norms) / len(gradient_norms)
+        max_norm = max(gradient_norms)
+        min_norm = min(gradient_norms)
+        zero_ratio = zero_grad_params / total_params
+        small_ratio = small_grad_params / total_params
+        large_ratio = large_grad_params / total_params
+    else:
+        avg_norm = max_norm = min_norm = 0
+        zero_ratio = small_ratio = large_ratio = 0
+    
+    # Print summary
+    print(f"📊 Gradient Statistics:")
+    print(f"   Total parameters with gradients: {total_params}")
+    print(f"   Average gradient norm: {avg_norm:.2e}")
+    print(f"   Max gradient norm: {max_norm:.2e}")
+    print(f"   Min gradient norm: {min_norm:.2e}")
+    print(f"   Zero gradients: {zero_grad_params} ({zero_ratio*100:.1f}%)")
+    print(f"   Small gradients (<1e-8): {small_grad_params} ({small_ratio*100:.1f}%)")
+    print(f"   Large gradients (>1e3): {large_grad_params} ({large_ratio*100:.1f}%)")
+    print(f"   NaN gradients: {nan_grad_params}")
+    print(f"   Inf gradients: {inf_grad_params}")
+    
+    # Print detailed info for key parameters
+    if param_details:
+        print(f"\n🔍 Key Parameter Details:")
+        for detail in param_details[:10]:  # Show top 10
+            print(f"   {detail['name'][:50]:50s} | norm: {detail['norm']:.2e} | max: {detail['max']:.2e} | shape: {detail['shape']}")
+            if detail['has_nan'] or detail['has_inf']:
+                print(f"      ⚠️  Contains NaN: {detail['has_nan']}, Inf: {detail['has_inf']}")
+    
+    # Print suspicious parameters
+    if suspicious_params:
+        print(f"\n⚠️  Suspicious Parameters ({len(suspicious_params)}):")
+        for param_info in suspicious_params[:15]:  # Show top 15
+            print(f"   {param_info}")
+        if len(suspicious_params) > 15:
+            print(f"   ... and {len(suspicious_params) - 15} more")
+    
+    # Health status
+    health_status = {
+        'total_params': total_params,
+        'avg_norm': avg_norm,
+        'max_norm': max_norm,
+        'zero_ratio': zero_ratio,
+        'suspicious': nan_grad_params + inf_grad_params,
+        'large_gradients': large_grad_params
+    }
+    
+    # Determine overall health
+    if nan_grad_params > 0 or inf_grad_params > 0:
+        health_color = "🔴"
+        health_desc = "CRITICAL"
+    elif zero_ratio > 0.5 or large_grad_params > 5:
+        health_color = "🟡"
+        health_desc = "WARNING"
+    else:
+        health_color = "🟢"
+        health_desc = "HEALTHY"
+    
+    print(f"\n{health_color} Overall Gradient Health: {health_desc}")
+    print("=" * 60)
+    
+    return health_status
+
+def check_model_weights_health(model, step):
+    """Check model weights for NaN/Inf issues"""
+    if step % 200 != 0:
+        return
         
-        print(f"📈 Gradient Statistics:")
-        print(f"   Total params with grad: {total_params}")
-        print(f"   Zero gradients: {zero_grad_params} ({zero_grad_params/total_params*100:.1f}%)")
-        print(f"   Very small gradients (<1e-6): {small_grad_params} ({small_grad_params/total_params*100:.1f}%)")
-        print(f"   Large gradients (>1e2): {large_grad_params} ({large_grad_params/total_params*100:.1f}%)")
-        print(f"   Norm stats: avg={avg_norm:.2e}, std={std_norm:.2e}, max={max_norm:.2e}, min={min_norm:.2e}")
-    print()
+    print(f"\n🔧 Model Weights Health Check at Step {step}")
+    
+    nan_weights = 0
+    inf_weights = 0
+    zero_weights = 0
+    total_weight_params = 0
+    
+    for name, param in model.named_parameters():
+        if 'weight' in name:
+            total_weight_params += 1
+            
+            if torch.isnan(param.data).any():
+                nan_weights += 1
+                print(f"🚨 NaN in weight: {name}")
+                
+            if torch.isinf(param.data).any():
+                inf_weights += 1
+                print(f"🚨 Inf in weight: {name}")
+                
+            weight_norm = torch.norm(param.data).item()
+            if weight_norm == 0:
+                zero_weights += 1
+                print(f"⚠️  Zero weight: {name}")
+    
+    if nan_weights == 0 and inf_weights == 0 and zero_weights == 0:
+        print("✅ All weights are healthy")
+    else:
+        print(f"⚠️  Weight issues: {nan_weights} NaN, {inf_weights} Inf, {zero_weights} Zero out of {total_weight_params} total")
 
 def main(args):
     Warning(f"\nSave_ckpt = {args.save_ckpt}, Save_dir = {args.save_dir}.\n")
@@ -647,9 +763,58 @@ def main(args):
         )
 
     elif args.optimizer.lower() == "adamw":
-        optimizer = torch.optim.AdamW(
-            trainable_params, lr=args.lr, weight_decay=args.weight_decay
-        )
+        # Full-rank training with optional 2:4 sparsity support
+        if args.enable_2to4_sparse:
+            logger.info("🔧 Full-rank + 2:4 Sparse Training Mode")
+            logger.info("📌 将在普通full-rank linear层上应用2:4稀疏训练")
+            
+            # Build target modules list based on attn_2by4 and mlp_2by4 flags
+            target_modules = []
+            
+            # Attention modules
+            attn_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+            # MLP modules  
+            mlp_modules = ["gate_proj", "up_proj", "down_proj"]
+            
+            if args.attn_2by4:
+                target_modules.extend(attn_modules)
+                logger.info("📌 将对注意力模块应用2:4稀疏: " + str(attn_modules))
+            
+            if args.mlp_2by4:
+                target_modules.extend(mlp_modules)
+                logger.info("📌 将对MLP模块应用2:4稀疏: " + str(mlp_modules))
+            
+            if not target_modules:
+                logger.warning("⚠️ 启用了2:4稀疏但没有选择任何目标模块！请检查 --attn_2by4 和 --mlp_2by4 参数")
+                logger.info("🔄 回退到普通full-rank AdamW训练")
+                optimizer = torch.optim.AdamW(
+                    trainable_params, lr=args.lr, weight_decay=args.weight_decay
+                )
+            else:
+                logger.info(f"🎯 最终目标模块列表: {target_modules}")
+                
+                # Apply 2:4 sparsity to full-rank linear layers
+                from sparse_fullrank_linear import replace_linear_with_sparse2to4
+                model = replace_linear_with_sparse2to4(
+                    model,
+                    target_modules=target_modules,
+                    sparse_init_scale=args.sparse_init_scale,
+                )
+                logger.info("✅ Full-rank linear layers replaced with Sparse2to4Linear!")
+                logger.info("🔬 使用与LORO+2:4完全相同的实现: SparseOverlayFunction、MVUE、scaling等")
+                
+                # Get updated trainable parameters after replacement
+                trainable_params = [p for p in model.parameters() if p.requires_grad]
+                
+                optimizer = torch.optim.AdamW(
+                    trainable_params, lr=args.lr, weight_decay=args.weight_decay
+                )
+                logger.info("📊 使用标准PyTorch AdamW优化器进行full-rank + 2:4 sparse训练")
+        else:
+            logger.info("🔧 Standard Full-rank AdamW Training Mode")
+            optimizer = torch.optim.AdamW(
+                trainable_params, lr=args.lr, weight_decay=args.weight_decay
+            )
 
     elif args.optimizer.lower() == "galore_adamw":
         # redefine way to call galore_adamw
@@ -756,7 +921,7 @@ def main(args):
         layer_wise_flag = True
 
     ## NOTE: LORO optimizer
-    if args.optimizer.lower() == "loro_adamw":
+    elif args.optimizer.lower() == "loro_adamw":
         # Always use standard LORO implementation as the base
         from loro_torch.lowrank_module import apply_lowrank_param, get_lowrank_param
         
@@ -987,6 +1152,60 @@ def main(args):
             # Exit immediately to prevent further corruption
             exit(1)
 
+        # 🔍 Debug: Check loss for NaN/Inf before backward
+        if torch.isnan(loss).any() or torch.isinf(loss).any():
+            print(f"🚨 CRITICAL: NaN/Inf detected in LOSS at step {global_step}!")
+            print(f"   Loss value: {loss.item()}")
+            print(f"   Loss has NaN: {torch.isnan(loss).any()}")
+            print(f"   Loss has Inf: {torch.isinf(loss).any()}")
+            
+            # Save emergency checkpoint before crash
+            if global_rank == 0:
+                emergency_path = os.path.join(args.save_dir, f"emergency_nan_loss_step_{global_step}")
+                os.makedirs(emergency_path, exist_ok=True)
+                torch.save({
+                    'model': model.state_dict() if not isinstance(model, torch.nn.parallel.DistributedDataParallel) else model.module.state_dict(),
+                    'step': global_step,
+                    'loss': loss.item()
+                }, os.path.join(emergency_path, "emergency_state.pt"))
+                print(f"💾 Emergency checkpoint saved to: {emergency_path}")
+            break
+        
+        # 🔍 Debug: Track loss trends and problems
+        if global_step % 200 == 0:  # 🔧 REDUCED: Every 200 steps instead of 50
+            current_loss = loss.item()
+            print(f"📈 Step {global_step}: Loss = {current_loss:.4f}")
+            
+            # Check for problematic loss trends
+            if hasattr(main, 'prev_loss'):
+                loss_change = current_loss - main.prev_loss
+                if abs(loss_change) > 1.0:  # 🚨 Large loss jump
+                    print(f"🚨 Large loss change: {loss_change:+.4f}")
+                elif current_loss > 20:  # 🚨 Very high loss
+                    print(f"🚨 High loss detected: {current_loss:.4f}")
+                elif current_loss < 0.1:  # 🚨 Loss too low too fast
+                    print(f"🚨 Loss dropping very fast: {current_loss:.4f}")
+            main.prev_loss = current_loss
+            
+            # 🔍 Track training health status
+            if not hasattr(main, 'mvue_skip_count'):
+                main.mvue_skip_count = 0
+                main.grad_vanish_count = 0
+                main.mvue_inf_count = 0
+                main.problem_start_step = None
+            
+            # 🔍 Report accumulated issues every 1000 steps
+            if global_step % 1000 == 0 and global_step > 0:
+                print(f"📊 Training Health Summary (Steps {global_step-1000} to {global_step}):")
+                print(f"   MVUE inf amplifications: {main.mvue_inf_count}")
+                print(f"   Gradient vanishing cases: {main.grad_vanish_count}")
+                if main.problem_start_step:
+                    print(f"   First major issue detected at step: {main.problem_start_step}")
+                
+                # Reset counters
+                main.mvue_inf_count = 0
+                main.grad_vanish_count = 0
+
         scaled_loss = loss / args.gradient_accumulation
         scaled_loss.backward()
 
@@ -996,10 +1215,50 @@ def main(args):
         ## NOTE: The below code is only executed during the update step
 
         # Check gradient health after backward pass
-        check_gradient_health(model, global_step)
+        health_status = check_gradient_health(model, global_step)
+        
+        # Check model weights health
+        check_model_weights_health(model, global_step)
+        
+        # 🔧 NEW: Early stopping based on gradient health
+        if health_status and (health_status['suspicious'] > 0 or health_status['zero_ratio'] > 0.8):
+            print(f"🛑 EARLY STOPPING: Gradient health deteriorated beyond recovery threshold!")
+            print(f"   Suspicious params: {health_status['suspicious']}")
+            print(f"   Zero gradient ratio: {health_status['zero_ratio']*100:.1f}%")
+            print(f"   Average gradient norm: {health_status['avg_norm']:.2e}")
+            
+            # Save emergency checkpoint
+            if global_rank == 0:
+                emergency_path = os.path.join(args.save_dir, f"emergency_stop_step_{global_step}")
+                os.makedirs(emergency_path, exist_ok=True)
+                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                    model.module.save_pretrained(emergency_path, max_shard_size="100GB")
+                else:
+                    model.save_pretrained(emergency_path, max_shard_size="100GB")
+                print(f"💾 Emergency checkpoint saved to {emergency_path}")
+            
+            # Exit gracefully
+            break
 
+        # 🔍 Debug: Gradient clipping analysis
         if args.grad_clipping != 0.0:
+            total_norm_before = torch.nn.utils.clip_grad_norm_(trainable_params, float('inf'))
             torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clipping)
+            
+            if global_step % 100 == 0:
+                print(f"🔧 Gradient Clipping Analysis (Step {global_step}):")
+                print(f"   Total gradient norm before clipping: {total_norm_before:.6f}")
+                print(f"   Clipping threshold: {args.grad_clipping}")
+                if total_norm_before > args.grad_clipping:
+                    print(f"   ✂️  Gradients were clipped (ratio: {args.grad_clipping/total_norm_before:.4f})")
+                else:
+                    print(f"   ✅ No clipping needed")
+                    
+                # Track extreme gradient norms
+                if total_norm_before > 100:
+                    print(f"⚠️  Very large gradient norm detected: {total_norm_before:.2f}")
+                elif total_norm_before < 1e-6:
+                    print(f"⚠️  Very small gradient norm detected: {total_norm_before:.2e}")
 
         if global_rank == 0:
             pbar.update(1)
@@ -1205,7 +1464,7 @@ def main(args):
         update_time = time.time()
 
         # Check gradient health
-        check_gradient_health(model, global_step)
+        health_status = check_gradient_health(model, global_step)
 
     # ##############################
     # END of training loop
