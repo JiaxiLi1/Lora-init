@@ -508,9 +508,6 @@ def apply_sparse_overlay_on_loro(
     replaced_count = 0
     
     for name, module in model.named_modules():
-        if not isinstance(module, nn.Linear):
-            continue
-            
         # Check if this module should be sparsified
         module_name = name.split('.')[-1]  # Get just the module name (e.g., "q_proj")
         if module_name not in target_modules:
