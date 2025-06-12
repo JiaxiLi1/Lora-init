@@ -106,7 +106,7 @@ class SparseOverlayFunction(autograd.Function):
         
         # Forward computation
         input_view = input.view(-1, input.shape[-1])
-        output = fake_fp8_mm(input_view, weight_sparse, torch.float8_e4m3fn)
+        output = fake_fp8_mm(input_view, weight_sparse.t(), torch.float8_e4m3fn)
         
         # 🔍 Debug: Check output
         debug_nan_output = torch.isnan(output).any()
@@ -186,8 +186,8 @@ class SparseOverlayFunction(autograd.Function):
             grad_output_view = grad_output.view(-1, grad_output.shape[-1])
             
             # Use dense weight for grad_input (as per reference implementation)
-            # For LORO: grad_input = grad_output @ weight.t()
-            grad_input = fake_fp8_mm(grad_output_view, weight.t(), torch.float8_e5m2).view(ctx.shape)
+            # For LORO: grad_input = grad_output @ weight (因为forward用了weight.t())
+            grad_input = fake_fp8_mm(grad_output_view, weight, torch.float8_e5m2).view(ctx.shape)
             
             # 🔍 Debug: Check grad_input
             if torch.isnan(grad_input).any():
@@ -251,7 +251,7 @@ class SparseOverlayFunction(autograd.Function):
             
             # 🔧 CORRECTED: Compute grad_weight using reference implementation pattern
             # Reference: fake_fp8_mm(MVUE_corrected_grad_output_transposed, input, ...)
-            grad_weight = fake_fp8_mm(grad_output_mvue_t, input_view, torch.float8_e5m2).t()
+            grad_weight = fake_fp8_mm(grad_output_mvue_t, input_view, torch.float8_e5m2)
             
             # 🚨 Critical grad_weight checks
             if torch.isnan(grad_weight).any():
