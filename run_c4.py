@@ -1279,6 +1279,14 @@ def main(args):
                 elif total_norm_before < 1e-6:
                     print(f"⚠️  Very small gradient norm detected: {total_norm_before:.2e}")
 
+        grad_norm = sum(
+            [
+                torch.norm(p.grad.clone().detach().cpu())
+                for p in model.parameters()
+                if p.grad is not None
+            ]
+        )
+
         if global_rank == 0:
             pbar.update(1)
 
@@ -1378,6 +1386,7 @@ def main(args):
                     "tokens_seen": tokens_seen,
                     "tokens_seen_before": tokens_seen_before,
                     "update_time": update_time,
+                    "gradnorm": grad_norm,
                     "max_memory_GB": max_memory_GB,
                 }
                 with open(f"{current_model_directory}/training_state.json", "w") as f:
@@ -1406,6 +1415,7 @@ def main(args):
                 "throughput_tokens": tokens_in_update / update_time,
                 "throughput_examples": args.total_batch_size / update_time,
                 "throughput_batches": batches_in_update / update_time,
+                "gradnorm": grad_norm,
                 "max_memory_GB": max_memory_GB,
             }
             
