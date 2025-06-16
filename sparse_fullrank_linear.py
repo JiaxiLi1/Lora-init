@@ -299,7 +299,7 @@ def calculate_model_flip_rate(model: nn.Module) -> dict:
     for name, module in model.named_modules():
         if isinstance(module, Sparse2to4Linear):
             flip_rate, changed_elements, elements = module.calculate_flip_rate()
-            flip_rates[f"flip_rate/{name}"] = flip_rate
+            flip_rates[f"flip_rate/{name}"] = float(flip_rate)  # 确保是Python标量
             all_flip_rates.append(flip_rate)
             
             # 累加所有层的元素数用于计算总体flip rate

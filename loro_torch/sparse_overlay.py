@@ -580,22 +580,22 @@ def calculate_sparse_overlay_flip_rate(model: nn.Module) -> dict:
             # Calculate flip rate for the module
             flip_rate, changed_elements, elements = module.calculate_flip_rate()
             
-            # Store individual flip rate
-            flip_rates[f"flip_rate/{name}"] = flip_rate
+            # Store individual flip rate - 确保是Python标量
+            flip_rates[f"flip_rate/{name}"] = float(flip_rate)
             
             # Add to overall statistics
             all_flip_rates.append(flip_rate)
             total_changed_elements += changed_elements
             total_elements += elements
     
-    # Calculate overall statistics
+    # Calculate overall statistics - 确保所有返回值都是Python标量
     if all_flip_rates:
-        flip_rates["flip_rate/mean"] = sum(all_flip_rates) / len(all_flip_rates)
-        flip_rates["flip_rate/max"] = max(all_flip_rates)
-        flip_rates["flip_rate/min"] = min(all_flip_rates)
+        flip_rates["flip_rate/mean"] = float(sum(all_flip_rates) / len(all_flip_rates))
+        flip_rates["flip_rate/max"] = float(max(all_flip_rates))
+        flip_rates["flip_rate/min"] = float(min(all_flip_rates))
         
         # 计算总体flip rate（所有层所有矩阵元素累加）
-        flip_rates["flip_rate/total"] = total_changed_elements / total_elements if total_elements > 0 else 0.0
+        flip_rates["flip_rate/total"] = float(total_changed_elements / total_elements) if total_elements > 0 else 0.0
     else:
         flip_rates["flip_rate/mean"] = 0.0
         flip_rates["flip_rate/max"] = 0.0

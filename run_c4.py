@@ -1452,8 +1452,13 @@ def main(args):
 
             wandb.log(wandb_dict, step=global_step)
 
-            # track training stats
-            df_train_tmp = {k: [v] for k, v in wandb_dict.items()}
+            # track training stats - 确保所有值都是Python标量，避免BFloat16类型问题
+            df_train_tmp = {}
+            for k, v in wandb_dict.items():
+                if hasattr(v, 'item'):  # 如果是torch tensor，转换为Python标量
+                    df_train_tmp[k] = [float(v.item())]
+                else:
+                    df_train_tmp[k] = [v]
             df_train_tmp["use_exact_loro"] = [use_exact_loro]
             df_train_tmp["opt_step"] = [scheduler.last_epoch]
             df_train_tmp["update_time"] = [update_time]
@@ -1492,11 +1497,11 @@ def main(args):
                     step=global_step,
                 )
 
-            # track evaluation stats
+            # track evaluation stats - 确保所有值都是Python标量，避免BFloat16类型问题
             df_eval_tmp = {
                 "global_step": [global_step],
                 "update_step": [update_step],
-                "eval_loss": [total_loss],
+                "eval_loss": [float(total_loss.item()) if hasattr(total_loss, 'item') else total_loss],
                 "eval_tokens": [evaluated_on_tokens],
                 "eval_time": [eval_time],
             }
@@ -1592,11 +1597,11 @@ def main(args):
         )
         logger.info(f"Final eval loss: {total_loss}")
 
-    # track evaluation stats
+    # track evaluation stats - 确保所有值都是Python标量，避免BFloat16类型问题
     df_eval_tmp = {
         "global_step": [global_step],
         "update_step": [update_step],
-        "eval_loss": [total_loss],
+        "eval_loss": [float(total_loss.item()) if hasattr(total_loss, 'item') else total_loss],
         "eval_tokens": [evaluated_on_tokens],
         "eval_time": [eval_time],
     }
