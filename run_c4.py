@@ -770,9 +770,17 @@ def main(args):
     )
 
     if args.optimizer.lower() == "adam":
-        optimizer = torch.optim.Adam(
-            trainable_params, lr=args.lr, weight_decay=args.weight_decay
-        )
+        # 🔧 Use proper parameter grouping for weight decay (Adam)
+        param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': args.weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        
+        optimizer = torch.optim.Adam(optim_groups, lr=args.lr)
 
     elif args.optimizer.lower() == "adamw":
         # Full-rank training with optional 2:4 sparsity support
@@ -799,9 +807,18 @@ def main(args):
             if not target_modules:
                 logger.warning("⚠️ 启用了2:4稀疏但没有选择任何目标模块！请检查 --attn_2by4 和 --mlp_2by4 参数")
                 logger.info("🔄 回退到普通full-rank AdamW训练")
-                optimizer = torch.optim.AdamW(
-                    trainable_params, lr=args.lr, weight_decay=args.weight_decay
-                )
+                
+                # 🔧 Use proper parameter grouping for weight decay (same as standard case)
+                param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
+                decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+                nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+                
+                optim_groups = [
+                    {'params': decay_params, 'weight_decay': args.weight_decay},
+                    {'params': nodecay_params, 'weight_decay': 0.0}
+                ]
+                
+                optimizer = torch.optim.AdamW(optim_groups, lr=args.lr)
             else:
                 logger.info(f"🎯 最终目标模块列表: {target_modules}")
                 
@@ -814,18 +831,44 @@ def main(args):
                 logger.info("✅ Full-rank linear layers replaced with Sparse2to4Linear!")
                 logger.info("🔬 使用与LORO+2:4完全相同的实现: SparseOverlayFunction、MVUE、scaling等")
                 
-                # Get updated trainable parameters after replacement
-                trainable_params = [p for p in model.parameters() if p.requires_grad]
+                # 🔧 Use proper parameter grouping for weight decay for 2:4 sparse training
+                param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
+                decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+                nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
                 
-                optimizer = torch.optim.AdamW(
-                    trainable_params, lr=args.lr, weight_decay=args.weight_decay
-                )
+                optim_groups = [
+                    {'params': decay_params, 'weight_decay': args.weight_decay},
+                    {'params': nodecay_params, 'weight_decay': 0.0}
+                ]
+                
+                num_decay_params = sum(p.numel() for p in decay_params)
+                num_nodecay_params = sum(p.numel() for p in nodecay_params)
+                logger.info(f"📊 (2:4 Sparse) Weight decay applied to {len(decay_params)} tensors ({num_decay_params:,} parameters)")
+                logger.info(f"📊 (2:4 Sparse) Weight decay NOT applied to {len(nodecay_params)} tensors ({num_nodecay_params:,} parameters)")
+                
+                optimizer = torch.optim.AdamW(optim_groups, lr=args.lr)
                 logger.info("📊 使用标准PyTorch AdamW优化器进行full-rank + 2:4 sparse训练")
         else:
             logger.info("🔧 Standard Full-rank AdamW Training Mode")
-            optimizer = torch.optim.AdamW(
-                trainable_params, lr=args.lr, weight_decay=args.weight_decay
-            )
+            
+            # 🔧 Improved: Use proper parameter grouping for weight decay
+            # Following best practices: only apply weight decay to 2D parameters (weights)
+            # Don't apply weight decay to 1D parameters (bias, LayerNorm, etc.)
+            param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
+            decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+            nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+            
+            optim_groups = [
+                {'params': decay_params, 'weight_decay': args.weight_decay},
+                {'params': nodecay_params, 'weight_decay': 0.0}
+            ]
+            
+            num_decay_params = sum(p.numel() for p in decay_params)
+            num_nodecay_params = sum(p.numel() for p in nodecay_params)
+            logger.info(f"📊 Weight decay applied to {len(decay_params)} tensors ({num_decay_params:,} parameters)")
+            logger.info(f"📊 Weight decay NOT applied to {len(nodecay_params)} tensors ({num_nodecay_params:,} parameters)")
+            
+            optimizer = torch.optim.AdamW(optim_groups, lr=args.lr)
 
     elif args.optimizer.lower() == "galore_adamw":
         # redefine way to call galore_adamw
@@ -991,7 +1034,7 @@ def main(args):
                 logger.info("✅ 2:4 sparse overlay applied on LORO parameters!")
 
         # Get base parameter groups for LORO
-        param_groups = get_lowrank_param(model, model_config, args.loro_lr_scaler)
+        param_groups = get_lowrank_param(model, model_config, args.loro_lr_scaler, args.weight_decay)
         
         # Note: Sparse scale parameters are now fixed buffers, not learnable parameters
         if args.enable_2to4_sparse:
@@ -1285,7 +1328,7 @@ def main(args):
                 for p in model.parameters()
                 if p.grad is not None
             ]
-        )
+        ).item()  # Convert tensor to Python scalar for JSON serialization
 
         if global_rank == 0:
             pbar.update(1)

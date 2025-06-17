@@ -150,7 +150,7 @@ def apply_lowrank_param(
     )
 
 
-def get_lowrank_param(model, model_config, lr_scaler=-1):
+def get_lowrank_param(model, model_config, lr_scaler=-1, weight_decay=0.0):
     # lr_scaler = -1: use adaptive lr_scaler = r / d, see ./loro_torch/loro_optim.py
     lowrank_params_in = []
     lowrank_params_out = []
@@ -178,6 +178,14 @@ def get_lowrank_param(model, model_config, lr_scaler=-1):
     id_lowrank_params = [id(p) for p in lowrank_params_in + lowrank_params_out]
     regular_params = [p for p in model.parameters() if id(p) not in id_lowrank_params]
 
+    # 🔧 Following v2/nanoGPT strategy: Apply weight decay based on parameter dimensions
+    # 2D parameters (weight matrices) get full weight_decay, 1D parameters (bias, layernorm) get 0
+    regular_decay_params = [p for p in regular_params if p.dim() >= 2]
+    regular_nodecay_params = [p for p in regular_params if p.dim() < 2]
+    
+    # Low-rank parameters are always 2D weight matrices, so they get full weight_decay
+    # (lowrank_params_in and lowrank_params_out are always 2D)
+
     init_std = model_config.initializer_range
     hidden_size = model_config.hidden_size
     intermediate_size = model_config.intermediate_size
@@ -185,10 +193,19 @@ def get_lowrank_param(model, model_config, lr_scaler=-1):
     param_groups = [
         {
             "type": "regular",
-            "params": regular_params,
+            "params": regular_decay_params,
             "hidden_size": hidden_size,
             "intermediate_size": intermediate_size,
             "init_std": init_std,
+            "weight_decay": weight_decay,  # Full weight decay for 2D params
+        },
+        {
+            "type": "regular_nodecay", 
+            "params": regular_nodecay_params,
+            "hidden_size": hidden_size,
+            "intermediate_size": intermediate_size,
+            "init_std": init_std,
+            "weight_decay": 0.0,  # No weight decay for 1D params (bias, layernorm)
         },
         {
             "type": "lowrank_in",
@@ -198,6 +215,7 @@ def get_lowrank_param(model, model_config, lr_scaler=-1):
             "hidden_size": hidden_size,
             "intermediate_size": intermediate_size,
             "init_std": init_std,
+            "weight_decay": weight_decay,  # Full weight decay for lowrank matrices
         },
         {
             "type": "lowrank_out",
@@ -207,7 +225,21 @@ def get_lowrank_param(model, model_config, lr_scaler=-1):
             "hidden_size": hidden_size,
             "intermediate_size": intermediate_size,
             "init_std": init_std,
+            "weight_decay": weight_decay,  # Full weight decay for lowrank matrices
         },
     ]
+
+    # 🔧 Print parameter statistics like v2/nanoGPT
+    num_regular_decay = sum(p.numel() for p in regular_decay_params)
+    num_regular_nodecay = sum(p.numel() for p in regular_nodecay_params)
+    num_lowrank_in = sum(p.numel() for p in lowrank_params_in)
+    num_lowrank_out = sum(p.numel() for p in lowrank_params_out)
+    
+    print(f"🔧 LORO Parameter groups:")
+    print(f"  Regular decay parameters: {len(regular_decay_params)} tensors, {num_regular_decay:,} parameters")
+    print(f"  Regular no-decay parameters: {len(regular_nodecay_params)} tensors, {num_regular_nodecay:,} parameters")
+    print(f"  Lowrank-in parameters: {len(lowrank_params_in)} tensors, {num_lowrank_in:,} parameters")
+    print(f"  Lowrank-out parameters: {len(lowrank_params_out)} tensors, {num_lowrank_out:,} parameters")
+    print(f"  Total parameters: {num_regular_decay + num_regular_nodecay + num_lowrank_in + num_lowrank_out:,}")
 
     return param_groups
