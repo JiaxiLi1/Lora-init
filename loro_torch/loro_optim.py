@@ -311,7 +311,8 @@ class LOROAdamW(Optimizer):
             # with the m/v parameters. This is equivalent to adding the square
             # of the weights to the loss with plain (non-momentum) SGD.
             # Add weight decay at the end (fixed version)
-            if group["weight_decay"] > 0.0:
+            # 🔧 Following v2/nanoGPT: only apply weight decay to 2D parameters
+            if group["weight_decay"] > 0.0 and p.dim() >= 2:
                 p.add_(
                     p,
                     alpha=(-group["lr"] * group["weight_decay"]),
