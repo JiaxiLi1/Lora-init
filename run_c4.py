@@ -846,8 +846,10 @@ def main(args):
                 logger.info(f"📊 (2:4 Sparse) Weight decay applied to {len(decay_params)} tensors ({num_decay_params:,} parameters)")
                 logger.info(f"📊 (2:4 Sparse) Weight decay NOT applied to {len(nodecay_params)} tensors ({num_nodecay_params:,} parameters)")
                 
-                optimizer = torch.optim.AdamW(optim_groups, lr=args.lr)
-                logger.info("📊 使用标准PyTorch AdamW优化器进行full-rank + 2:4 sparse训练")
+                # ‼️ CRITICAL FIX: Use bnb.optim.AdamW for correct weight decay with sparse autograd.Function
+                logger.info("‼️ 使用 bnb.optim.AdamW 来确保 weight_decay 在2:4稀疏训练中正确生效 (L2 Regularization)")
+                optimizer = bnb.optim.AdamW(optim_groups, lr=args.lr, betas=(0.9, 0.95))
+
         else:
             logger.info("🔧 Standard Full-rank AdamW Training Mode")
             
