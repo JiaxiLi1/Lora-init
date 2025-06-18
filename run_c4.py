@@ -77,6 +77,8 @@ def parse_args():
     )
     parser.add_argument("--attn_2by4", type=str_to_bool, default=False)
     parser.add_argument("--mlp_2by4", type=str_to_bool, default=True)
+    parser.add_argument("--mlp_up_down", type=str_to_bool, default=False,
+                        help="Apply 2:4 sparsity only to MLP up_proj and down_proj modules (excludes gate_proj)")
     parser.add_argument(
         "--enable_2to4_sparse",
         type=str_to_bool,
@@ -714,7 +716,7 @@ def main(args):
         model_size = extract_size_and_type(args.model_config)
         runname = f"{time.strftime('%m%d_%H%M%S')}_gc{args.grad_clipping}_step{args.num_training_steps}_" \
                   f"model{model_size}_ar{args.loro_attn_rank}_loty{args.loro_type}_fr{args.loro_freq}_ls_{args.loro_lr_scaler}_sc{args.scheduler}_crfr{args.cosine_restart_freq}_as{args.lr_adjust_steps}_ra{args.loro_refresh}_rf{args.loro_refresh_freq}_sc_{args.loro_scope}_ini_{args.loro_init}_op_{args.optimizer}_mlr{args.min_lr_ratio}_lr{args.lr}_bs{args.batch_size}_" \
-                  f"tbs{args.total_batch_size}_severy_{args.save_every}_eevery_{args.eval_every}_2by4{args.enable_2to4_sparse}_a2by4{args.attn_2by4}_m2by4{args.mlp_2by4}_" \
+                  f"tbs{args.total_batch_size}_severy_{args.save_every}_eevery_{args.eval_every}_2by4{args.enable_2to4_sparse}_a2by4{args.attn_2by4}_m2by4{args.mlp_2by4}_mlpupdown{args.mlp_up_down}_" \
                   f"save{args.save_ckpt}"
         print(f"runname= {runname}")
         runname_dir = os.path.join(args.save_dir, runname)
@@ -793,16 +795,21 @@ def main(args):
             
             # Attention modules
             attn_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
-            # MLP modules  
-            mlp_modules = ["gate_proj", "up_proj", "down_proj"]
             
             if args.attn_2by4:
                 target_modules.extend(attn_modules)
                 logger.info("📌 将对注意力模块应用2:4稀疏: " + str(attn_modules))
             
             if args.mlp_2by4:
+                if args.mlp_up_down:
+                    # 只对up_proj和down_proj应用2:4稀疏，排除gate_proj
+                    mlp_modules = ["up_proj", "down_proj"]
+                    logger.info("📌 将对MLP up/down模块应用2:4稀疏: " + str(mlp_modules) + " (排除gate_proj)")
+                else:
+                    # 对所有MLP模块应用2:4稀疏
+                    mlp_modules = ["gate_proj", "up_proj", "down_proj"]
+                    logger.info("📌 将对MLP模块应用2:4稀疏: " + str(mlp_modules))
                 target_modules.extend(mlp_modules)
-                logger.info("📌 将对MLP模块应用2:4稀疏: " + str(mlp_modules))
             
             if not target_modules:
                 logger.warning("⚠️ 启用了2:4稀疏但没有选择任何目标模块！请检查 --attn_2by4 和 --mlp_2by4 参数")
@@ -1011,16 +1018,21 @@ def main(args):
             
             # Attention modules
             attn_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
-            # MLP modules  
-            mlp_modules = ["gate_proj", "up_proj", "down_proj"]
             
             if args.attn_2by4:
                 target_modules.extend(attn_modules)
                 logger.info("📌 将对注意力模块应用2:4稀疏: " + str(attn_modules))
             
             if args.mlp_2by4:
+                if args.mlp_up_down:
+                    # 只对up_proj和down_proj应用2:4稀疏，排除gate_proj
+                    mlp_modules = ["up_proj", "down_proj"]
+                    logger.info("📌 将对MLP up/down模块应用2:4稀疏: " + str(mlp_modules) + " (排除gate_proj)")
+                else:
+                    # 对所有MLP模块应用2:4稀疏
+                    mlp_modules = ["gate_proj", "up_proj", "down_proj"]
+                    logger.info("📌 将对MLP模块应用2:4稀疏: " + str(mlp_modules))
                 target_modules.extend(mlp_modules)
-                logger.info("📌 将对MLP模块应用2:4稀疏: " + str(mlp_modules))
             
             if not target_modules:
                 logger.warning("⚠️ 启用了2:4稀疏但没有选择任何目标模块！请检查 --attn_2by4 和 --mlp_2by4 参数")
@@ -1164,7 +1176,9 @@ def main(args):
             except ImportError:
                 pass  # LORO sparse overlay functions may not be available
         else:
-            logger.warning("⚠️ Flip rate requested but no 2:4 sparse training enabled. Flip rate will be 0.")
+            logger.warning("⚠️ Flip rate requested but no 2:4 sparse training enabled.")
+            logger.info("ℹ️ Flip rate只适用于2:4稀疏训练。当前模式下flip rate将始终为0。")
+            logger.info("ℹ️ 要启用flip rate跟踪，请设置 --enable_2to4_sparse True")
     else:
         logger.info("ℹ️ Flip rate tracking disabled")
 
