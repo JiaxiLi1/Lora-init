@@ -9,6 +9,7 @@ import pandas as pd
 import wandb
 import datetime
 import re
+import inspect
 
 import torch
 import torch.nn as nn
@@ -35,7 +36,10 @@ from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor
 from loro_torch.loro_optim import LOROAdamW
 
 from sparse_fullrank_linear import (
-    apply_sparse2to4_to_model, 
+    apply_sparse2to4_to_model,
+    apply_activation_sparse2to4_to_model, 
+    Sparse2to4Linear,
+    ActivationSparse2to4Linear,
     enable_flip_rate_tracking_for_model,
     calculate_model_flip_rate
 )
@@ -90,6 +94,24 @@ def parse_args():
         type=float,
         default=1.0,
         help="Initial scale for sparse weights (will be overwritten by computed values)"
+    )
+    parser.add_argument(
+        "--activation_2by4",
+        type=str_to_bool,
+        default=False,
+        help="Enable 2:4 sparsity on input activations in addition to weights"
+    )
+    parser.add_argument(
+        "--activation_soft_threshold",
+        type=str_to_bool,
+        default=False,
+        help="Use soft threshold method for activation 2:4 sparsity (True) or MVUE method (False). Only effective when --activation_2by4 is True"
+    )
+    parser.add_argument(
+        "--squ_relu",
+        type=str_to_bool,
+        default=False,
+        help="Replace LLaMA MLP activation function with squared ReLU (x^2 for x > 0, 0 otherwise)"
     )
     parser.add_argument("--c4_local", type=str_to_bool, default=True)
     parser.add_argument("--train_data_path", type=str, default="en/c4-train.*.json.gz",
@@ -569,6 +591,7 @@ def main(args):
 
     logger.info("Process group initialized")
     device = f"cuda:{local_rank}"
+    device_type = 'cuda' if 'cuda' in device else 'cpu'
     print(f"Rank {global_rank} using device {device}")
 
     args.num_cuda = torch.cuda.device_count()
@@ -663,7 +686,12 @@ def main(args):
     )
 
     model_config = AutoConfig.from_pretrained(args.model_config)
-
+    
+    # Add squ_relu parameter to model config
+    model_config.squ_relu = args.squ_relu
+    if args.squ_relu:
+        logger.info("🔧 Squared ReLU (relu2) activation will be used in MLP layers")
+    
     if "geomlrk" in args.optimizer and args.loro_mlp_dense:
         mlp_rank = min(model_config.intermediate_size, args.loro_mlp_rank)
         model_config.intermediate_size = mlp_rank
@@ -810,52 +838,56 @@ def main(args):
                     mlp_modules = ["gate_proj", "up_proj", "down_proj"]
                     logger.info("📌 将对MLP模块应用2:4稀疏: " + str(mlp_modules))
                 target_modules.extend(mlp_modules)
-            
-            if not target_modules:
-                logger.warning("⚠️ 启用了2:4稀疏但没有选择任何目标模块！请检查 --attn_2by4 和 --mlp_2by4 参数")
-                logger.info("🔄 回退到普通full-rank AdamW训练")
-                
-                # 🔧 Use proper parameter grouping for weight decay (same as standard case)
-                param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
-                decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-                nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-                
-                optim_groups = [
-                    {'params': decay_params, 'weight_decay': args.weight_decay},
-                    {'params': nodecay_params, 'weight_decay': 0.0}
-                ]
-                
-                optimizer = torch.optim.AdamW(optim_groups, lr=args.lr)
+
+            logger.info(f"🎯 最终目标模块列表: {target_modules}")
+
+            # Choose sparsity mode based on activation_2by4 parameter
+            if args.activation_2by4:
+                # Apply activation 2:4 sparsity (weights remain dense)
+                logger.info("🔧 Mode: 激活稀疏化 (权重保持dense)")
+                model = apply_activation_sparse2to4_to_model(
+                    model,
+                    target_modules=target_modules,
+                    activation_2by4=True,
+                    activation_soft_threshold=args.activation_soft_threshold,
+                )
+                method = "soft threshold" if args.activation_soft_threshold else "MVUE"
+                logger.info(f"✅ Full-rank linear layers replaced with ActivationSparse2to4Linear!")
+                logger.info(f"🎯 激活2:4化已启用: 使用 {method} 方法，权重保持dense")
             else:
-                logger.info(f"🎯 最终目标模块列表: {target_modules}")
-                
-                # Apply 2:4 sparsity to full-rank linear layers
-                from sparse_fullrank_linear import apply_sparse2to4_to_model
+                # Apply weight 2:4 sparsity (traditional mode)
+                logger.info("🔧 Mode: 权重稀疏化 (传统2:4模式)")
                 model = apply_sparse2to4_to_model(
                     model,
                     target_modules=target_modules,
                 )
                 logger.info("✅ Full-rank linear layers replaced with Sparse2to4Linear!")
-                logger.info("🔬 使用与LORO+2:4完全相同的实现: SparseOverlayFunction、MVUE、scaling等")
-                
-                # 🔧 Use proper parameter grouping for weight decay for 2:4 sparse training
-                param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
-                decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-                nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
-                
-                optim_groups = [
-                    {'params': decay_params, 'weight_decay': args.weight_decay},
-                    {'params': nodecay_params, 'weight_decay': 0.0}
-                ]
-                
-                num_decay_params = sum(p.numel() for p in decay_params)
-                num_nodecay_params = sum(p.numel() for p in nodecay_params)
-                logger.info(f"📊 (2:4 Sparse) Weight decay applied to {len(decay_params)} tensors ({num_decay_params:,} parameters)")
-                logger.info(f"📊 (2:4 Sparse) Weight decay NOT applied to {len(nodecay_params)} tensors ({num_nodecay_params:,} parameters)")
-                
-                # ‼️ CRITICAL FIX: Use bnb.optim.AdamW for correct weight decay with sparse autograd.Function
-                logger.info("‼️ 使用 bnb.optim.AdamW 来确保 weight_decay 在2:4稀疏训练中正确生效 (L2 Regularization)")
-                optimizer = bnb.optim.AdamW(optim_groups, lr=args.lr, betas=(0.9, 0.95))
+                logger.info("🎯 权重2:4化已启用，激活保持dense")
+
+            # 🔧 Use proper parameter grouping for weight decay for 2:4 sparse training
+            param_dict = {pn: p for pn, p in model.named_parameters() if p.requires_grad}
+            decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+            nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+
+            optim_groups = [
+                {'params': decay_params, 'weight_decay': args.weight_decay},
+                {'params': nodecay_params, 'weight_decay': 0.0}
+            ]
+
+            num_decay_params = sum(p.numel() for p in decay_params)
+            num_nodecay_params = sum(p.numel() for p in nodecay_params)
+            logger.info(f"📊 (2:4 Sparse) Weight decay applied to {len(decay_params)} tensors ({num_decay_params:,} parameters)")
+            logger.info(f"📊 (2:4 Sparse) Weight decay NOT applied to {len(nodecay_params)} tensors ({num_nodecay_params:,} parameters)")
+
+            # Create AdamW optimizer and use the fused version if it is available
+            fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+            use_fused = fused_available and device_type == 'cuda'
+            extra_args = dict(fused=True) if use_fused else dict()
+            optimizer = torch.optim.AdamW(optim_groups, lr=args.lr, betas=(0.9, 0.95), **extra_args)
+            print(f"using fused AdamW: {use_fused}")
+            # ‼️ CRITICAL FIX: Use bnb.optim.AdamW for correct weight decay with sparse autograd.Function
+            # logger.info("‼️ 使用 bnb.optim.AdamW 来确保 weight_decay 在2:4稀疏训练中正确生效 (L2 Regularization)")
+            # optimizer = bnb.optim.AdamW(optim_groups, lr=args.lr, betas=(0.9, 0.95))
 
         else:
             logger.info("🔧 Standard Full-rank AdamW Training Mode")
@@ -1162,23 +1194,11 @@ def main(args):
 
     # 启用flip rate跟踪（如果请求）
     if args.flip_rate:
-        if hasattr(args, 'enable_2to4_sparse') and args.enable_2to4_sparse:
-            logger.info("🔧 启用flip rate跟踪...")
-            # For pure Sparse2to4Linear (full-rank + 2:4 sparse mode)
-            enable_flip_rate_tracking_for_model(model, enabled=True)
-            logger.info("✅ Flip rate tracking enabled for Sparse2to4Linear modules")
-            
-            # Also enable for LORO + 2:4 sparse combination if applicable
-            try:
-                from loro_torch.sparse_overlay import enable_flip_rate_tracking_for_sparse_overlay
-                enable_flip_rate_tracking_for_sparse_overlay(model, enabled=True)
-                logger.info("✅ Flip rate tracking also enabled for LORO SparseOverlay modules")
-            except ImportError:
-                pass  # LORO sparse overlay functions may not be available
-        else:
-            logger.warning("⚠️ Flip rate requested but no 2:4 sparse training enabled.")
-            logger.info("ℹ️ Flip rate只适用于2:4稀疏训练。当前模式下flip rate将始终为0。")
-            logger.info("ℹ️ 要启用flip rate跟踪，请设置 --enable_2to4_sparse True")
+        logger.info("🔧 启用flip rate跟踪...")
+        # For pure Sparse2to4Linear (full-rank + 2:4 sparse mode)
+        from loro_torch.sparse_overlay import enable_flip_rate_tracking_for_sparse_overlay
+        enable_flip_rate_tracking_for_sparse_overlay(model, enabled=True)
+        logger.info("✅ Flip rate tracking enabled for Sparse2to4Linear modules")
     else:
         logger.info("ℹ️ Flip rate tracking disabled")
 

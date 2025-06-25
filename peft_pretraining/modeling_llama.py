@@ -147,12 +147,21 @@ class LlamaMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
+        config=None,
     ):
         super().__init__()
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.act_fn = ACT2FN[hidden_act]
+        
+        # Check if squared ReLU should be used
+        use_squ_relu = getattr(config, 'squ_relu', False) if config is not None else False
+        
+        if use_squ_relu:
+            self.act_fn = ACT2FN["relu2"]  # ReLUSquaredActivation
+            print(f"🔧 Using squared ReLU (relu2) activation in MLP")
+        else:
+            self.act_fn = ACT2FN[hidden_act]
 
     def forward(self, x):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -249,6 +258,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
+            config=config,
         )
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
