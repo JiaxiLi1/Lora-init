@@ -217,9 +217,19 @@ class SparseOverlayFunction(autograd.Function):
                 # 🔧 FIXED: Apply MVUE to transposed grad_output (like reference implementation)
                 grad_output_t = grad_output_view.t()  # Transpose first
                 
+                # Convert bfloat16 to float16 for Triton compatibility
+                original_dtype = grad_output_t.dtype
+                if grad_output_t.dtype == torch.bfloat16:
+                    grad_output_t = grad_output_t.to(torch.float16)
+                
                 # 🔍 Apply MVUE and track problems (no modification of behavior)
                 grad_t_norm_before = torch.norm(grad_output_t).item()
                 grad_output_mvue_t = MVUE24_approx_triton(grad_output_t)  # Apply MVUE as intended
+                
+                # Convert back to original dtype
+                if original_dtype == torch.bfloat16:
+                    grad_output_mvue_t = grad_output_mvue_t.to(torch.bfloat16)
+                    
                 grad_mvue_norm_after = torch.norm(grad_output_mvue_t).item()
                 
                 # 🔍 Calculate ratio safely and track issues

@@ -64,7 +64,20 @@ class FP8SparseLinear(autograd.Function):
         if ctx.needs_input_grad[1]:
             input = input.view(-1, input.shape[-1])
             grad_output = grad_output.view(-1, grad_output.shape[-1])
-            grad_weight = fake_fp8_mm(MVUE24_approx_triton(grad_output.t()), input, torch.float8_e5m2)
+            
+            # Convert bfloat16 to float16 for Triton compatibility
+            grad_output_temp = grad_output.t()
+            original_dtype = grad_output_temp.dtype
+            if grad_output_temp.dtype == torch.bfloat16:
+                grad_output_temp = grad_output_temp.to(torch.float16)
+                
+            grad_output_mvue = MVUE24_approx_triton(grad_output_temp)
+            
+            # Convert back to original dtype
+            if original_dtype == torch.bfloat16:
+                grad_output_mvue = grad_output_mvue.to(torch.bfloat16)
+                
+            grad_weight = fake_fp8_mm(grad_output_mvue, input, torch.float8_e5m2)
             
         if ctx.needs_input_grad[2]:
             grad_bias = grad_output.sum(0)

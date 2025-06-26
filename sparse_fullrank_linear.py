@@ -136,7 +136,20 @@ class fp8_linear(autograd.Function):
         if ctx.needs_input_grad[1]:
             input = input.view(-1, input.shape[-1])
             grad_output = grad_output.view(-1, grad_output.shape[-1])
-            grad_weight = fake_fp8_mm(MVUE24_approx_triton(grad_output.t()), input, torch.float8_e5m2)
+            
+            # Convert bfloat16 to float16 for Triton compatibility
+            grad_output_temp = grad_output.t()
+            original_dtype = grad_output_temp.dtype
+            if grad_output_temp.dtype == torch.bfloat16:
+                grad_output_temp = grad_output_temp.to(torch.float16)
+                
+            grad_output_mvue = MVUE24_approx_triton(grad_output_temp)
+            
+            # Convert back to original dtype
+            if original_dtype == torch.bfloat16:
+                grad_output_mvue = grad_output_mvue.to(torch.bfloat16)
+                
+            grad_weight = fake_fp8_mm(grad_output_mvue, input, torch.float8_e5m2)
         if ctx.needs_input_grad[2]:
             grad_bias = grad_output.sum(0)
         # Return gradients for all forward parameters (input, weight, bias, activation_2by4, activation_soft_threshold, activation_scale)
@@ -241,7 +254,18 @@ class Sparse2to4Linear(nn.Linear):
         device = self.weight.device
         if self.weight.is_cuda:
             weight_temp = self.weight.detach()
+            
+            # Convert bfloat16 to float16 for Triton compatibility
+            original_dtype = weight_temp.dtype
+            if weight_temp.dtype == torch.bfloat16:
+                weight_temp = weight_temp.to(torch.float16)
+                
             weight_sparse, _ = soft_threshold24_triton(weight_temp)
+            
+            # Convert back to original dtype for scale calculation
+            if original_dtype == torch.bfloat16:
+                weight_sparse = weight_sparse.to(torch.bfloat16)
+                
             scale_value = torch.dot(torch.flatten(self.weight), torch.flatten(weight_sparse)) / torch.dot(
                 torch.flatten(weight_sparse), torch.flatten(weight_sparse))
             self.scale.copy_(scale_value)

@@ -77,7 +77,20 @@ class sparse_linear(autograd.Function):
         grad_input = grad_weight = grad_bias = None
         if ctx.needs_input_grad[0]:
             grad_output = grad_output.reshape(-1, grad_output.shape[-1])
-            grad_input = torch.mm(grad_output, MVUE24_approx_triton(weight.t()).t()).view(ctx.shape)
+            
+            # Convert bfloat16 to float16 for Triton compatibility
+            weight_temp = weight.t()
+            original_dtype = weight_temp.dtype
+            if weight_temp.dtype == torch.bfloat16:
+                weight_temp = weight_temp.to(torch.float16)
+                
+            weight_mvue = MVUE24_approx_triton(weight_temp)
+            
+            # Convert back to original dtype
+            if original_dtype == torch.bfloat16:
+                weight_mvue = weight_mvue.to(torch.bfloat16)
+                
+            grad_input = torch.mm(grad_output, weight_mvue.t()).view(ctx.shape)
         if ctx.needs_input_grad[1]:
             input = input.view(-1, input.shape[-1])
             grad_output = grad_output.view(-1, grad_output.shape[-1])
