@@ -18,24 +18,418 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch LLaMA model."""
+import os
 import math
 from typing import List, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.cuda.amp import custom_fwd, custom_bwd
+from torch import autograd
 
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
+from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from transformers.models.llama.configuration_llama import LlamaConfig
 
+# Import 2:4 sparse functions
+try:
+    from sparse import matmul, MVUE24_approx_triton, soft_threshold24_triton
+    SPARSE_AVAILABLE = True
+except ImportError:
+    SPARSE_AVAILABLE = False
+    raise RuntimeError(
+        "❌ CRITICAL: sparse package with triton kernels is required for activation 2:4 sparsity!\n"
+        "Please ensure you have the correct sparse package installed.\n"
+        "No fallback implementations are allowed as per user requirements."
+    )
+
+# Import fake_fp8_mm from sparse_fullrank_linear.py
+try:
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    from sparse_fullrank_linear import fake_fp8_mm
+except ImportError:
+    raise RuntimeError(
+        "❌ CRITICAL: Cannot import fake_fp8_mm from sparse_fullrank_linear.py!\n"
+        "This function is required for activation 2:4 sparsity."
+    )
 
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
+
+
+class SquaredReLUActivation(nn.Module):
+    """
+    Squared ReLU activation function: f(x) = x^2 if x > 0, else 0
+    This is used as an alternative to SwiGLU in MLP layers.
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return torch.where(x > 0, x * x, torch.zeros_like(x))
+
+
+class ActivationSparse2to4Function(autograd.Function):
+    """
+    Activation 2:4 sparsification with proper forward and backward passes
+    
+    Forward: Apply 2:4 sparsity to activations using specified method
+    Backward: Apply feature-wise 2:4 sparsity as described in the paper
+    
+    Scale values are computed once and then fixed, like in your existing code.
+    """
+    
+    # Class-level storage for scales (computed once and then fixed)
+    _soft_threshold_scales = {}
+    
+    # Class-level storage for token permutation (fixed across training)
+    _token_permutation = {}
+    _inverse_permutation = {}
+    
+    # Training step counter for dense warmup
+    _training_step = 0
+    _warmup_steps = 1000  # Default value, can be overridden
+    
+    @staticmethod
+    @custom_fwd
+    def forward(ctx, input, sparsity_method="mvue", warmup_steps=None):
+        """
+        Forward pass: Apply 2:4 sparsity to activations
+        
+        Args:
+            input: Input tensor (batch_size, seq_len, hidden_size)
+            sparsity_method: "naive", "mvue", or "soft_threshold"
+            warmup_steps: Number of steps for dense warmup (if None, uses class default)
+        """
+        ctx.sparsity_method = sparsity_method
+        ctx.input_shape = input.shape
+        
+        # Update warmup steps if provided
+        if warmup_steps is not None:
+            ActivationSparse2to4Function._warmup_steps = warmup_steps
+        
+        # Dense warmup for first N iterations (configurable)
+        if ActivationSparse2to4Function._training_step < ActivationSparse2to4Function._warmup_steps:
+            # Store identity mask for backward pass during warmup
+            forward_mask = torch.ones_like(input.view(-1, input.shape[-1]))
+            ctx.save_for_backward(forward_mask)
+            return input
+        
+        # Apply token permutation (Optimization 2 from paper)
+        batch_size, seq_len, hidden_size = input.shape
+        perm_key = f"{seq_len}_{input.device}"
+        
+        if perm_key not in ActivationSparse2to4Function._token_permutation:
+            # Create fixed permutation for this sequence length
+            perm = torch.randperm(seq_len, device=input.device)
+            inv_perm = torch.argsort(perm)
+            ActivationSparse2to4Function._token_permutation[perm_key] = perm
+            ActivationSparse2to4Function._inverse_permutation[perm_key] = inv_perm
+        
+        perm = ActivationSparse2to4Function._token_permutation[perm_key]
+        inv_perm = ActivationSparse2to4Function._inverse_permutation[perm_key]
+        
+        # Apply permutation: [batch_size, seq_len, hidden_size] -> [batch_size, seq_len, hidden_size]
+        input_permuted = input[:, perm, :]
+        ctx.inv_perm = inv_perm
+        
+        # Store forward mask for backward pass
+        input_2d = input_permuted.view(-1, input_permuted.shape[-1])
+        
+        if sparsity_method == "naive":
+            # Simple 2:4 sparsity: keep top 2 values in each group of 4
+            output_2d = apply_naive_2to4_sparsity(input_2d)
+        elif sparsity_method == "mvue":
+            # MVUE method
+            output_2d = apply_mvue_2to4_sparsity(input_2d)
+        elif sparsity_method == "soft_threshold":
+            # Soft threshold method with fixed scale (computed once)
+            scale_key = f"{input.device}_{input.dtype}_{input.shape[-1]}"
+            if scale_key not in ActivationSparse2to4Function._soft_threshold_scales:
+                # Compute scale once and fix it
+                input_temp = input_2d.detach()
+                if input_temp.dtype == torch.bfloat16:
+                    input_temp = input_temp.to(torch.float16)
+                
+                input_sparse, _ = soft_threshold24_triton(input_temp)
+                
+                if input_2d.dtype == torch.bfloat16:
+                    input_sparse = input_sparse.to(torch.bfloat16)
+                
+                scale = torch.dot(torch.flatten(input_2d), torch.flatten(input_sparse)) / torch.dot(
+                    torch.flatten(input_sparse), torch.flatten(input_sparse))
+                ActivationSparse2to4Function._soft_threshold_scales[scale_key] = scale.item()
+            
+            scale_value = ActivationSparse2to4Function._soft_threshold_scales[scale_key]
+            output_2d = apply_soft_threshold_2to4_sparsity(input_2d, scale_value)
+        else:
+            raise ValueError(f"Unknown sparsity method: {sparsity_method}")
+        
+        # Store the forward sparsity mask for backward pass
+        forward_mask = (output_2d != 0).float()
+        ctx.save_for_backward(forward_mask)
+        
+        # Reshape and apply inverse permutation
+        output_permuted = output_2d.view(batch_size, seq_len, hidden_size)
+        output = output_permuted[:, inv_perm, :]
+        
+        return output
+    
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, grad_output):
+        """
+        Backward pass: Apply feature-wise 2:4 sparsity as described in the paper
+        
+        The paper describes:
+        1. Split sparse tensors into 2 tensors: 95% features that can be 2:4 sparsified feature-wise,
+           and 5% features with remaining non-sparse features
+        2. Apply fixed permutation to tokens before entering FFN
+        3. Sparsify feature-wise on top of token-wise sparsification mask
+        """
+        forward_mask, = ctx.saved_tensors
+        
+        # Dense warmup for first N iterations (configurable)
+        if ActivationSparse2to4Function._training_step < ActivationSparse2to4Function._warmup_steps:
+            return grad_output, None, None
+        
+        # Apply token permutation to gradient
+        batch_size, seq_len, hidden_size = grad_output.shape
+        perm_key = f"{seq_len}_{grad_output.device}"
+        
+        if perm_key in ActivationSparse2to4Function._token_permutation:
+            perm = ActivationSparse2to4Function._token_permutation[perm_key]
+            inv_perm = ActivationSparse2to4Function._inverse_permutation[perm_key]
+            
+            # Apply permutation to gradient
+            grad_permuted = grad_output[:, perm, :]
+        else:
+            # Fallback if permutation not found
+            grad_permuted = grad_output
+            inv_perm = None
+        
+        # Reshape for processing
+        grad_2d = grad_permuted.view(-1, grad_permuted.shape[-1])
+        batch_seq_len, hidden_size = grad_2d.shape
+        
+        # Feature-wise sparsity implementation
+        grad_sparse = apply_feature_wise_2to4_sparsity(grad_2d, forward_mask)
+        
+        # Reshape and apply inverse permutation
+        grad_sparse_reshaped = grad_sparse.view(batch_size, seq_len, hidden_size)
+        
+        if inv_perm is not None:
+            grad_final = grad_sparse_reshaped[:, inv_perm, :]
+        else:
+            grad_final = grad_sparse_reshaped
+        
+        # Return gradients for all 3 input parameters: input, sparsity_method, warmup_steps
+        # Only input needs gradients, others are strings/None so return None
+        return grad_final, None, None
+    
+    @staticmethod
+    def increment_step():
+        """Increment training step counter for dense warmup"""
+        ActivationSparse2to4Function._training_step += 1
+    
+    @staticmethod
+    def get_training_step():
+        """Get current training step"""
+        return ActivationSparse2to4Function._training_step
+    
+    @staticmethod
+    def set_warmup_steps(steps):
+        """Set the number of warmup steps"""
+        ActivationSparse2to4Function._warmup_steps = steps
+    
+    @staticmethod
+    def get_warmup_steps():
+        """Get the number of warmup steps"""
+        return ActivationSparse2to4Function._warmup_steps
+
+
+def apply_naive_2to4_sparsity(input_tensor):
+    """
+    Apply naive 2:4 sparsity: keep top 2 values in each group of 4
+    """
+    batch_size, hidden_size = input_tensor.shape
+    
+    # Ensure hidden_size is divisible by 4
+    if hidden_size % 4 != 0:
+        # Pad to make it divisible by 4
+        pad_size = 4 - (hidden_size % 4)
+        input_padded = F.pad(input_tensor, (0, pad_size), value=0)
+        hidden_size_padded = hidden_size + pad_size
+    else:
+        input_padded = input_tensor
+        hidden_size_padded = hidden_size
+    
+    # Reshape to groups of 4
+    input_reshaped = input_padded.view(batch_size, -1, 4)
+    
+    # Find top 2 values in each group
+    abs_values = torch.abs(input_reshaped)
+    _, top_indices = torch.topk(abs_values, 2, dim=-1)
+    
+    # Create mask
+    mask = torch.zeros_like(input_reshaped)
+    mask.scatter_(-1, top_indices, 1.0)
+    
+    # Apply mask
+    output_reshaped = input_reshaped * mask
+    output_padded = output_reshaped.view(batch_size, hidden_size_padded)
+    
+    # Remove padding if it was added
+    if hidden_size % 4 != 0:
+        output = output_padded[:, :hidden_size]
+    else:
+        output = output_padded
+    
+    return output
+
+
+def apply_mvue_2to4_sparsity(input_tensor):
+    """
+    Apply MVUE 2:4 sparsity using triton kernel
+    """
+    # Convert bfloat16 to float16 for Triton compatibility
+    original_dtype = input_tensor.dtype
+    if input_tensor.dtype == torch.bfloat16:
+        input_temp = input_tensor.to(torch.float16)
+    else:
+        input_temp = input_tensor
+    
+    # Apply MVUE 2:4 sparsity
+    output_temp = MVUE24_approx_triton(input_temp)
+    
+    # Convert back to original dtype
+    if original_dtype == torch.bfloat16:
+        output = output_temp.to(torch.bfloat16)
+    else:
+        output = output_temp
+    
+    return output
+
+
+def apply_soft_threshold_2to4_sparsity(input_tensor, scale):
+    """
+    Apply soft threshold 2:4 sparsity using triton kernel
+    """
+    # Convert bfloat16 to float16 for Triton compatibility
+    original_dtype = input_tensor.dtype
+    if input_tensor.dtype == torch.bfloat16:
+        input_temp = input_tensor.to(torch.float16)
+    else:
+        input_temp = input_tensor
+    
+    # Apply soft threshold 2:4 sparsity
+    output_temp, _ = soft_threshold24_triton(input_temp)
+    
+    # Convert back to original dtype and apply scale
+    if original_dtype == torch.bfloat16:
+        output = output_temp.to(torch.bfloat16) * scale
+    else:
+        output = output_temp * scale
+    
+    return output
+
+
+def apply_feature_wise_2to4_sparsity(grad_tensor, forward_mask):
+    """
+    Apply feature-wise 2:4 sparsity for backward pass as described in the paper
+    
+    Implementation of the paper's approach:
+    1. Split features into sparse (95%) and dense (5%) groups
+    2. Apply 2:4 sparsity feature-wise to the sparse group
+    3. Keep dense group unchanged
+    4. Maintain forward sparsity mask
+    """
+    batch_seq_len, hidden_size = grad_tensor.shape
+    
+    # Step 1: Analyze feature sparsity to determine which features can be 2:4 sparsified
+    feature_sparsity = torch.mean((grad_tensor != 0).float(), dim=0)  # [hidden_size]
+    
+    # Step 2: Sort features by sparsity level
+    sparsity_threshold = 0.75  # Features with >75% sparsity can be 2:4 sparsified
+    sparse_features_mask = feature_sparsity > sparsity_threshold
+    
+    # Ensure we have at least 95% of features as sparse (as mentioned in paper)
+    num_sparse_features = max(int(0.95 * hidden_size), sparse_features_mask.sum().item())
+    
+    if sparse_features_mask.sum() < num_sparse_features:
+        # If not enough naturally sparse features, select top sparsest features
+        _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
+        sparse_features_mask = torch.zeros(hidden_size, dtype=torch.bool, device=grad_tensor.device)
+        sparse_features_mask[sparse_indices] = True
+    
+    # Step 3: Apply feature-wise 2:4 sparsity
+    grad_output = grad_tensor.clone()
+    
+    # For sparse features: apply feature-wise 2:4 sparsity
+    if sparse_features_mask.any():
+        sparse_grad = grad_tensor[:, sparse_features_mask]  # [batch_seq_len, num_sparse_features]
+        
+        # Apply 2:4 sparsity along the batch dimension (feature-wise)
+        sparse_grad_t = sparse_grad.t()  # [num_sparse_features, batch_seq_len]
+        sparse_grad_2to4 = apply_naive_2to4_sparsity_featurewise(sparse_grad_t)
+        sparse_grad_final = sparse_grad_2to4.t()  # [batch_seq_len, num_sparse_features]
+        
+        grad_output[:, sparse_features_mask] = sparse_grad_final
+    
+    # Step 4: Apply forward mask to maintain consistency
+    # This ensures that values dropped in forward pass don't reappear in backward
+    grad_output = grad_output * forward_mask
+    
+    return grad_output
+
+
+def apply_naive_2to4_sparsity_featurewise(input_tensor):
+    """
+    Apply 2:4 sparsity along the second dimension (feature-wise)
+    input_tensor: [num_features, batch_seq_len]
+    """
+    num_features, batch_seq_len = input_tensor.shape
+    
+    # Ensure batch_seq_len is divisible by 4
+    if batch_seq_len % 4 != 0:
+        pad_size = 4 - (batch_seq_len % 4)
+        input_padded = F.pad(input_tensor, (0, pad_size), value=0)
+        batch_seq_len_padded = batch_seq_len + pad_size
+    else:
+        input_padded = input_tensor
+        batch_seq_len_padded = batch_seq_len
+    
+    # Reshape to groups of 4 along the batch dimension
+    input_reshaped = input_padded.view(num_features, -1, 4)
+    
+    # Find top 2 values in each group
+    abs_values = torch.abs(input_reshaped)
+    _, top_indices = torch.topk(abs_values, 2, dim=-1)
+    
+    # Create mask
+    mask = torch.zeros_like(input_reshaped)
+    mask.scatter_(-1, top_indices, 1.0)
+    
+    # Apply mask
+    output_reshaped = input_reshaped * mask
+    output_padded = output_reshaped.view(num_features, batch_seq_len_padded)
+    
+    # Remove padding if it was added
+    if batch_seq_len % 4 != 0:
+        output = output_padded[:, :batch_seq_len]
+    else:
+        output = output_padded
+    
+    return output
 
 
 # Copied from transformers.models.bart.modeling_bart._make_causal_mask
@@ -150,21 +544,63 @@ class LlamaMLP(nn.Module):
         config=None,
     ):
         super().__init__()
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        
+        # Store config for later use
+        self.config = config
         
         # Check if squared ReLU should be used
         use_squ_relu = getattr(config, 'squ_relu', False) if config is not None else False
         
         if use_squ_relu:
-            self.act_fn = ACT2FN["relu2"]  # ReLUSquaredActivation
-            print(f"🔧 Using squared ReLU (relu2) activation in MLP")
+            # New architecture: GPT-2 style MLP with squared ReLU
+            # Remove gate_proj, keep only up_proj and down_proj
+            # Adjust dimensions to maintain same parameter count
+            
+            # Original SwiGLU has 3 linear layers: gate_proj, up_proj, down_proj
+            # Each with dimensions: hidden_size -> intermediate_size (gate & up) and intermediate_size -> hidden_size (down)
+            # Total params: 2 * (hidden_size * intermediate_size) + (intermediate_size * hidden_size) = 3 * hidden_size * intermediate_size
+            
+            # New architecture has 2 linear layers: up_proj and down_proj
+            # To maintain same param count: 2 * (hidden_size * new_intermediate_size) = 3 * hidden_size * intermediate_size
+            # Therefore: new_intermediate_size = 1.5 * intermediate_size
+            
+            self.new_intermediate_size = int(1.5 * intermediate_size)
+            self.up_proj = nn.Linear(hidden_size, self.new_intermediate_size, bias=False)
+            self.down_proj = nn.Linear(self.new_intermediate_size, hidden_size, bias=False)
+            self.gate_proj = None  # No gate projection in new architecture
+            self.act_fn = ACT2FN["relu2"]
+            # self.act_fn = SquaredReLUActivation()
+            print(f"🔧 Using squared ReLU MLP architecture: hidden_size={hidden_size}, new_intermediate_size={self.new_intermediate_size}")
+            print(f"🔧 Parameter count maintained: original={3 * hidden_size * intermediate_size}, new={2 * hidden_size * self.new_intermediate_size}")
         else:
+            # Original SwiGLU architecture
+            self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+            self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+            self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
             self.act_fn = ACT2FN[hidden_act]
+            self.new_intermediate_size = intermediate_size
 
     def forward(self, x):
-        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        if self.gate_proj is None:
+            # New squared ReLU architecture with automatic activation 2:4 sparsity
+            # up_proj -> squared_relu -> [2:4 sparsify] -> down_proj
+            up_output = self.up_proj(x)
+            activated = self.act_fn(up_output)
+            
+            # When squ_relu=True, automatically apply 2:4 sparsity to activation
+            config = getattr(self, 'config', None)
+            if config is not None:
+                sparsity_method = getattr(config, 'activation_sparse_method', 'mvue')
+                warmup_steps = getattr(config, 'activation_dense_warmup_steps', 1000)
+                activated_sparse = ActivationSparse2to4Function.apply(activated, sparsity_method, warmup_steps)
+            else:
+                # Fallback to MVUE if no config
+                activated_sparse = ActivationSparse2to4Function.apply(activated, 'mvue', 1000)
+            
+            return self.down_proj(activated_sparse)
+        else:
+            # Original SwiGLU architecture: gate_proj * silu(up_proj) -> down_proj
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 class LlamaAttention(nn.Module):

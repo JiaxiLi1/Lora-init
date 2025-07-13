@@ -111,20 +111,7 @@ def parse_args():
         "--squ_relu",
         type=str_to_bool,
         default=False,
-        help="Replace LLaMA MLP activation function with squared ReLU (x^2 for x > 0, 0 otherwise) and enable activation 2:4 sparsity"
-    )
-    parser.add_argument(
-        "--activation_sparse_method",
-        type=str,
-        default="mvue",
-        choices=["naive", "mvue", "soft_threshold"],
-        help="Method for activation 2:4 sparsification when squ_relu is enabled: naive (top-2), mvue, or soft_threshold"
-    )
-    parser.add_argument(
-        "--activation_dense_warmup_steps",
-        type=int,
-        default=1000,
-        help="Number of training steps to use dense training before enabling activation 2:4 sparsity (paper uses 1000)"
+        help="Replace LLaMA MLP activation function with squared ReLU (x^2 for x > 0, 0 otherwise)"
     )
     parser.add_argument("--c4_local", type=str_to_bool, default=True)
     parser.add_argument("--train_data_path", type=str, default="en/c4-train.*.json.gz",
@@ -704,12 +691,6 @@ def main(args):
     model_config.squ_relu = args.squ_relu
     if args.squ_relu:
         logger.info("🔧 Squared ReLU (relu2) activation will be used in MLP layers")
-        logger.info(f"🔧 Activation 2:4 sparsity automatically enabled with method: {args.activation_sparse_method}")
-        logger.info(f"🔧 Dense warmup for first {args.activation_dense_warmup_steps} steps, then activation 2:4 sparsity")
-        
-        # When squ_relu is True, automatically enable activation 2:4 sparsity
-        model_config.activation_sparse_method = args.activation_sparse_method
-        model_config.activation_dense_warmup_steps = args.activation_dense_warmup_steps
     
     if "geomlrk" in args.optimizer and args.loro_mlp_dense:
         mlp_rank = min(model_config.intermediate_size, args.loro_mlp_rank)
@@ -1259,15 +1240,15 @@ def main(args):
             if large_params:
                 print(f"⚠️  Parameters with large values: {large_params[:5]}")
             
-            # # Save debug checkpoint
-            # if global_rank == 0:
-            #     debug_path = os.path.join(args.save_dir, f"debug_nan_step_{global_step}")
-            #     os.makedirs(debug_path, exist_ok=True)
-            #     torch.save(model.state_dict(), os.path.join(debug_path, "model_state_with_nan.bin"))
-            #     print(f"💾 Debug checkpoint saved to {debug_path}")
-            #
-            # # Exit immediately to prevent further corruption
-            # exit(1)
+            # Save debug checkpoint
+            if global_rank == 0:
+                debug_path = os.path.join(args.save_dir, f"debug_nan_step_{global_step}")
+                os.makedirs(debug_path, exist_ok=True)
+                torch.save(model.state_dict(), os.path.join(debug_path, "model_state_with_nan.bin"))
+                print(f"💾 Debug checkpoint saved to {debug_path}")
+            
+            # Exit immediately to prevent further corruption
+            exit(1)
 
         # 🔍 Debug: Check loss for NaN/Inf before backward
         if torch.isnan(loss).any() or torch.isinf(loss).any():
@@ -1414,19 +1395,6 @@ def main(args):
             optimizer.zero_grad()
 
         update_step += 1
-        
-        # Update activation sparse step counter for dense warmup
-        if args.squ_relu:
-            from peft_pretraining.modeling_llama import ActivationSparse2to4Function
-            ActivationSparse2to4Function.increment_step()
-            
-            # Log warmup status
-            current_step = ActivationSparse2to4Function.get_training_step()
-            if current_step == args.activation_dense_warmup_steps:
-                logger.info(f"🔧 Dense warmup completed at step {current_step}. Activation 2:4 sparsity now enabled.")
-            elif current_step < args.activation_dense_warmup_steps and current_step % 100 == 0:
-                logger.info(f"🔧 Dense warmup progress: {current_step}/{args.activation_dense_warmup_steps} steps")
-        
         update_time = time.time() - update_time
 
         # verbose logging
