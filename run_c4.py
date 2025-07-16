@@ -126,6 +126,12 @@ def parse_args():
         default=1000,
         help="Number of training steps to use dense training before enabling activation 2:4 sparsity (paper uses 1000)"
     )
+    parser.add_argument(
+        "--dx_direct_sparse",
+        type=str_to_bool,
+        default=False,
+        help="If True, use direct naive sparse for dx computation instead of split-GEMM strategy in backward pass"
+    )
     parser.add_argument("--c4_local", type=str_to_bool, default=True)
     parser.add_argument("--train_data_path", type=str, default="en/c4-train.*.json.gz",
                         help="Path to C4 training data files")
@@ -706,10 +712,12 @@ def main(args):
         logger.info("🔧 Squared ReLU (relu2) activation will be used in MLP layers")
         logger.info(f"🔧 Activation 2:4 sparsity automatically enabled with method: {args.activation_sparse_method}")
         logger.info(f"🔧 Dense warmup for first {args.activation_dense_warmup_steps} steps, then activation 2:4 sparsity")
+        logger.info(f"🔧 dx_direct_sparse = {args.dx_direct_sparse} ({'direct naive sparse' if args.dx_direct_sparse else 'split-GEMM strategy'})")
         
         # When squ_relu is True, automatically enable activation 2:4 sparsity
         model_config.activation_sparse_method = args.activation_sparse_method
         model_config.activation_dense_warmup_steps = args.activation_dense_warmup_steps
+        model_config.dx_direct_sparse = args.dx_direct_sparse
     
     if "geomlrk" in args.optimizer and args.loro_mlp_dense:
         mlp_rank = min(model_config.intermediate_size, args.loro_mlp_rank)
@@ -920,7 +928,7 @@ def main(args):
             
             optim_groups = [
                 {'params': decay_params, 'weight_decay': args.weight_decay},
-                {'params': nodecay_params, 'weight_decay': 0.0}
+                {'params': nodecay_params, 'weight_decay': args.weight_decay}
             ]
             
             num_decay_params = sum(p.numel() for p in decay_params)
