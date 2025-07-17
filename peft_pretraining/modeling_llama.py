@@ -32,6 +32,18 @@ from torch import autograd
 
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
+
+# Add custom activation functions to ACT2FN
+class SquaredReLUActivationFunction(nn.Module):
+    """Squared ReLU activation function: f(x) = x^2 if x > 0, else 0"""
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x):
+        return torch.where(x > 0, x * x, torch.zeros_like(x))
+
+# Register custom activation functions
+ACT2FN["relu2"] = SquaredReLUActivationFunction()
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
@@ -676,11 +688,20 @@ class LlamaMLP(nn.Module):
         # Store config for later use
         self.config = config
         
-        # Check if squared ReLU should be used
-        use_squ_relu = getattr(config, 'squ_relu', False) if config is not None else False
+        # Get activation function type from config
+        activation_type = getattr(config, 'squ_relu', 'silu') if config is not None else 'silu'
         
-        if use_squ_relu:
-            # New architecture: GPT-2 style MLP with squared ReLU
+        if activation_type == 'silu':
+            # Original SwiGLU architecture: gate_proj * silu(up_proj) -> down_proj
+            self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+            self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+            self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+            self.act_fn = ACT2FN[hidden_act]
+            self.new_intermediate_size = intermediate_size
+            self.architecture_type = 'silu'
+            print(f"🔧 Using original SwiGLU architecture: hidden_size={hidden_size}, intermediate_size={intermediate_size}")
+        else:
+            # New architecture: GPT-2 style MLP without gate projection
             # Remove gate_proj, keep only up_proj and down_proj
             # Adjust dimensions to maintain same parameter count
             
@@ -696,47 +717,53 @@ class LlamaMLP(nn.Module):
             self.up_proj = nn.Linear(hidden_size, self.new_intermediate_size, bias=False)
             self.down_proj = nn.Linear(self.new_intermediate_size, hidden_size, bias=False)
             self.gate_proj = None  # No gate projection in new architecture
-            self.act_fn = ACT2FN["relu2"]
-            # self.act_fn = SquaredReLUActivation()
-            print(f"🔧 Using squared ReLU MLP architecture: hidden_size={hidden_size}, new_intermediate_size={self.new_intermediate_size}")
+            self.architecture_type = activation_type
+            
+            if activation_type == 'relu':
+                self.act_fn = ACT2FN["relu"]
+                print(f"🔧 Using ReLU MLP architecture: hidden_size={hidden_size}, new_intermediate_size={self.new_intermediate_size}")
+            elif activation_type == 'relu2':
+                self.act_fn = ACT2FN["relu2"]
+                print(f"🔧 Using squared ReLU MLP architecture: hidden_size={hidden_size}, new_intermediate_size={self.new_intermediate_size}")
+            
             print(f"🔧 Parameter count maintained: original={3 * hidden_size * intermediate_size}, new={2 * hidden_size * self.new_intermediate_size}")
-        else:
-            # Original SwiGLU architecture
-            self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-            self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
-            self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-            self.act_fn = ACT2FN[hidden_act]
-            self.new_intermediate_size = intermediate_size
 
     def forward(self, x):
-        if self.gate_proj is None:
-            # New squared ReLU architecture with complete FFN flow
-            # Use the complete ActivationSparse2to4Function that handles entire FFN
-            config = getattr(self, 'config', None)
-            if config is not None:
-                sparsity_method = getattr(config, 'activation_sparse_method', 'mvue')
-                warmup_steps = getattr(config, 'activation_dense_warmup_steps', 1000)
-            else:
-                # Fallback to MVUE if no config
-                sparsity_method = 'mvue'
-                warmup_steps = 1000
-            
-            # Complete FFN flow: input -> up_proj -> squared_relu -> [2:4 sparsify] -> down_proj
-            dx_direct_sparse = getattr(config, 'dx_direct_sparse', False) if config is not None else False
-            
-            return ActivationSparse2to4Function.apply(
-                x,                    # input
-                self.up_proj.weight,  # weight1 (first linear layer)
-                self.down_proj.weight, # weight2 (second linear layer)
-                None,                 # bias1 (up_proj has no bias)
-                None,                 # bias2 (down_proj has no bias)
-                sparsity_method,      # sparsity method
-                warmup_steps,         # warmup steps
-                dx_direct_sparse      # dx computation method
-            )
-        else:
+        if self.architecture_type == 'silu':
             # Original SwiGLU architecture: gate_proj * silu(up_proj) -> down_proj
             return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        else:
+            # New architecture without gate projection
+            config = getattr(self, 'config', None)
+            use_activation_2by4 = getattr(config, 'activation_2by4', False) if config is not None else False
+            
+            if use_activation_2by4 and self.architecture_type == 'relu2':
+                # Use activation 2:4 sparsity with squared ReLU
+                # Complete FFN flow: input -> up_proj -> squared_relu -> [2:4 sparsify] -> down_proj
+                if config is not None:
+                    sparsity_method = getattr(config, 'activation_sparse_method', 'mvue')
+                    warmup_steps = getattr(config, 'activation_dense_warmup_steps', 1000)
+                    dx_direct_sparse = getattr(config, 'dx_direct_sparse', False)
+                else:
+                    # Fallback values if no config
+                    sparsity_method = 'mvue'
+                    warmup_steps = 1000
+                    dx_direct_sparse = False
+                
+                return ActivationSparse2to4Function.apply(
+                    x,                    # input
+                    self.up_proj.weight,  # weight1 (first linear layer)
+                    self.down_proj.weight, # weight2 (second linear layer)
+                    None,                 # bias1 (up_proj has no bias)
+                    None,                 # bias2 (down_proj has no bias)
+                    sparsity_method,      # sparsity method
+                    warmup_steps,         # warmup steps
+                    dx_direct_sparse      # dx computation method
+                )
+            else:
+                # Standard forward pass without activation 2:4 sparsity
+                # input -> up_proj -> activation -> down_proj
+                return self.down_proj(self.act_fn(self.up_proj(x)))
 
 
 class LlamaAttention(nn.Module):
