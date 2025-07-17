@@ -34,16 +34,8 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, SequenceClassifierOutputWithPast
 
 # Add custom activation functions to ACT2FN
-class SquaredReLUActivationFunction(nn.Module):
-    """Squared ReLU activation function: f(x) = x^2 if x > 0, else 0"""
-    def __init__(self):
-        super().__init__()
-    
-    def forward(self, x):
-        return torch.where(x > 0, x * x, torch.zeros_like(x))
 
 # Register custom activation functions
-ACT2FN["relu2"] = SquaredReLUActivationFunction()
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
