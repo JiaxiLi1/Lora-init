@@ -32,7 +32,7 @@ from peft_pretraining.modeling_llama import LlamaForCausalLM
 
 import bitsandbytes as bnb
 from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor
-
+from peft_pretraining.modeling_llama import ActivationSparse2to4Function, ActivationSparse2to4LowRankFunction
 from loro_torch.loro_optim import LOROAdamW
 
 from sparse_fullrank_linear import (
@@ -1429,8 +1429,9 @@ def main(args):
         
         # Update activation sparse step counter for dense warmup
         if args.activation_2by4:
-            from peft_pretraining.modeling_llama import ActivationSparse2to4Function
+            
             ActivationSparse2to4Function.increment_step()
+            ActivationSparse2to4LowRankFunction.increment_step()
             
             # Log warmup status
             current_step = ActivationSparse2to4Function.get_training_step()

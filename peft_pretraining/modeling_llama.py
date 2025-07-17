@@ -40,7 +40,7 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from transformers.models.llama.configuration_llama import LlamaConfig
-
+from loro_torch.lowrank_module import LowRankLinear
 # Import 2:4 sparse functions
 try:
     from sparse import matmul, MVUE24_approx_triton, soft_threshold24_triton
@@ -68,6 +68,43 @@ except ImportError:
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
+
+
+def compute_split_gemm_dw2_lowrank(y2, d_intermediate_2, y2_forward, weight_in2):
+    """
+    计算低秩层的 weight_in2 梯度使用 Split-GEMM 策略
+    grad_weight_in2 = y2.T @ d_intermediate_2，但使用95%/5%特征分割
+    """
+    batch_seq_len, intermediate_size = y2.shape
+    rank2 = d_intermediate_2.shape[1]
+    
+    # 分析特征稀疏性
+    feature_sparsity = torch.mean((y2_forward != 0).float(), dim=0)  # [intermediate_size]
+    
+    # 选择95%的特征作为稀疏特征
+    num_sparse_features = int(0.95 * intermediate_size)
+    _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
+    
+    # 创建稀疏和稠密特征的mask
+    sparse_mask = torch.zeros(intermediate_size, dtype=torch.bool, device=y2.device)
+    sparse_mask[sparse_indices] = True
+    dense_mask = ~sparse_mask
+    
+    # Split-GEMM计算
+    grad_weight_in2 = torch.zeros(intermediate_size, rank2, device=y2.device, dtype=y2.dtype)
+    
+    # 稀疏部分：使用2:4稀疏化的y2
+    if sparse_mask.any():
+        y2_sparse_part = y2[:, sparse_mask]
+        y2_sparse_2to4 = apply_naive_2to4_sparsity_featurewise(y2_sparse_part.t()).t()
+        grad_weight_in2[sparse_mask, :] = torch.mm(y2_sparse_2to4.T, d_intermediate_2)
+    
+    # 稠密部分：使用原始y2
+    if dense_mask.any():
+        y2_dense_part = y2[:, dense_mask]
+        grad_weight_in2[dense_mask, :] = torch.mm(y2_dense_part.T, d_intermediate_2)
+    
+    return grad_weight_in2
 
 
 def compute_split_gemm_dw2(y2, dy3, y2_forward):
@@ -173,6 +210,262 @@ class SquaredReLUActivation(nn.Module):
 
     def forward(self, x):
         return torch.where(x > 0, x * x, torch.zeros_like(x))
+
+
+class ActivationSparse2to4LowRankFunction(autograd.Function):
+    """
+    Low-rank版本的Activation 2:4 Sparsity FFN实现
+    
+    处理LowRankLinear层的情况，其中每个linear层由两个低秩矩阵组成：
+    - up_proj: x @ weight_in1 @ weight_out1.T
+    - down_proj: x @ weight_in2 @ weight_out2.T
+    
+    Forward Pass:
+    1. 输入置换 (Input Permutation)
+    2. 第一个低秩全连接层: y1 = x @ weight_in1 @ weight_out1.T
+    3. 平方ReLU激活函数: y2 = ReLU²(y1)
+    4. 第二个低秩全连接层: y3 = sparsified(y2) @ weight_in2 @ weight_out2.T
+    5. 逆向置换 (Inverse Permutation)
+    """
+    
+    # Class-level storage for token permutation (fixed across training)
+    _token_permutation = {}
+    _inverse_permutation = {}
+    
+    # Training step counter for dense warmup
+    _training_step = 0
+    _warmup_steps = 1000  # Default value, can be overridden
+    
+    @staticmethod
+    @custom_fwd
+    def forward(ctx, input, weight_in1, weight_out1, weight_in2, weight_out2, bias1=None, bias2=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=False):
+        """
+        低秩FFN Forward Pass
+        
+        Args:
+            input: Input tensor (batch_size, seq_len, hidden_size)
+            weight_in1: First layer input weight (hidden_size, rank1)
+            weight_out1: First layer output weight (intermediate_size, rank1)
+            weight_in2: Second layer input weight (intermediate_size, rank2)
+            weight_out2: Second layer output weight (hidden_size, rank2)
+            bias1: First layer bias (optional)
+            bias2: Second layer bias (optional)
+            sparsity_method: "naive", "mvue", or "soft_threshold"
+            warmup_steps: Number of steps for dense warmup
+            dx_direct_sparse: If True, use direct naive sparse for dx computation
+        """
+        ctx.sparsity_method = sparsity_method
+        ctx.input_shape = input.shape
+        ctx.dx_direct_sparse = dx_direct_sparse
+        
+        # Update warmup steps if provided
+        if warmup_steps is not None:
+            ActivationSparse2to4LowRankFunction._warmup_steps = warmup_steps
+        
+        batch_size, seq_len, hidden_size = input.shape
+        
+        # Step 1: 输入置换 (Input Permutation)
+        perm_key = f"{seq_len}_{input.device}"
+        
+        if perm_key not in ActivationSparse2to4LowRankFunction._token_permutation:
+            # Create fixed permutation for this sequence length
+            perm = torch.randperm(seq_len, device=input.device)
+            inv_perm = torch.argsort(perm)
+            ActivationSparse2to4LowRankFunction._token_permutation[perm_key] = perm
+            ActivationSparse2to4LowRankFunction._inverse_permutation[perm_key] = inv_perm
+        
+        perm = ActivationSparse2to4LowRankFunction._token_permutation[perm_key]
+        inv_perm = ActivationSparse2to4LowRankFunction._inverse_permutation[perm_key]
+        
+        # Apply permutation: [batch_size, seq_len, hidden_size]
+        input_permuted = input[:, perm, :]
+        
+        # Step 2: 第一个低秩全连接层 (First Low-rank Linear Layer)
+        # y1 = x @ weight_in1 @ weight_out1.T
+        input_2d = input_permuted.view(-1, input_permuted.shape[-1])  # [batch*seq, hidden_size]
+        intermediate_1 = torch.mm(input_2d, weight_in1)  # [batch*seq, rank1]
+        y1 = torch.mm(intermediate_1, weight_out1.T)  # [batch*seq, intermediate_size]
+        if bias1 is not None:
+            y1 = y1 + bias1
+        
+        # Step 3: 平方ReLU激活函数 (Squared-ReLU Activation)
+        # y2 = ReLU²(y1)
+        y2 = torch.where(y1 > 0, y1 * y1, torch.zeros_like(y1))
+        
+        # Dense warmup for first N iterations
+        if ActivationSparse2to4LowRankFunction._training_step < ActivationSparse2to4LowRankFunction._warmup_steps:
+            # During warmup, use dense computation
+            # y3 = y2 @ weight_in2 @ weight_out2.T
+            intermediate_2 = torch.mm(y2, weight_in2)  # [batch*seq, rank2]
+            y3 = torch.mm(intermediate_2, weight_out2.T)  # [batch*seq, hidden_size]
+            if bias2 is not None:
+                y3 = y3 + bias2
+            
+            # Store variables for backward pass
+            ctx.save_for_backward(input_permuted, weight_in1, weight_out1, weight_in2, weight_out2, bias1, bias2, y1, y2, y2, intermediate_1, intermediate_2)
+            ctx.perm = perm
+            ctx.inv_perm = inv_perm
+            ctx.is_warmup = True
+        else:
+            # Step 4: 第二个低秩全连接层 (Second Low-rank Linear Layer) - Sparse GEMM
+            # Apply 2:4 sparsity to y2 (token-wise/row-wise)
+            if sparsity_method == "naive":
+                y2_sparse = apply_naive_2to4_sparsity(y2)
+            elif sparsity_method == "mvue":
+                y2_sparse = apply_mvue_2to4_sparsity(y2)
+            elif sparsity_method == "soft_threshold":
+                y2_sparse = apply_soft_threshold_2to4_sparsity(y2, scale=1.0)
+            else:
+                raise ValueError(f"Unknown sparsity method: {sparsity_method}")
+            
+            # y3 = sparsified(y2) @ weight_in2 @ weight_out2.T
+            intermediate_2 = torch.mm(y2_sparse, weight_in2)  # [batch*seq, rank2]
+            y3 = torch.mm(intermediate_2, weight_out2.T)  # [batch*seq, hidden_size]
+            if bias2 is not None:
+                y3 = y3 + bias2
+            
+            # Store variables for backward pass
+            ctx.save_for_backward(input_permuted, weight_in1, weight_out1, weight_in2, weight_out2, bias1, bias2, y1, y2, y2_sparse, intermediate_1, intermediate_2)
+            ctx.perm = perm
+            ctx.inv_perm = inv_perm
+            ctx.is_warmup = False
+        
+        # Step 5: 逆向置换 (Inverse Permutation)
+        y3_reshaped = y3.view(batch_size, seq_len, hidden_size)
+        output = y3_reshaped[:, inv_perm, :]
+        
+        return output
+    
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, grad_output):
+        """
+        低秩FFN Backward Pass
+        """
+        input_permuted, weight_in1, weight_out1, weight_in2, weight_out2, bias1, bias2, y1, y2, y2_forward, intermediate_1, intermediate_2 = ctx.saved_tensors
+        perm = ctx.perm
+        inv_perm = ctx.inv_perm
+        is_warmup = ctx.is_warmup
+        dx_direct_sparse = ctx.dx_direct_sparse
+        
+        batch_size, seq_len, hidden_size = grad_output.shape
+        
+        # Step 1: 梯度置换 (Gradient Permutation)
+        grad_output_permuted = grad_output[:, perm, :]
+        dy3 = grad_output_permuted.view(-1, grad_output_permuted.shape[-1])  # [batch*seq, hidden_size]
+        
+        # Step 2: 计算第二个低秩层的梯度
+        # dy3 -> d_intermediate_2 -> dy2
+        # y3 = intermediate_2 @ weight_out2.T
+        # dy3 = d_intermediate_2 @ weight_out2.T
+        d_intermediate_2 = torch.mm(dy3, weight_out2)  # [batch*seq, rank2]
+        # intermediate_2 = y2 @ weight_in2
+        # d_intermediate_2 = dy2 @ weight_in2
+        dy2 = torch.mm(d_intermediate_2, weight_in2.T)  # [batch*seq, intermediate_size]
+        
+        # Step 3: 反向通过激活函数 (Backprop through Activation)
+        # dy1 = 2 * dy2 * ReLU(y1)
+        relu_y1 = torch.where(y1 > 0, y1, torch.zeros_like(y1))
+        dy1 = 2 * dy2 * relu_y1
+        
+        # Initialize gradients
+        grad_input = grad_weight_in1 = grad_weight_out1 = grad_weight_in2 = grad_weight_out2 = grad_bias1 = grad_bias2 = None
+        
+        if is_warmup:
+            # Dense warmup: standard gradient computation
+            if ctx.needs_input_grad[0]:
+                # dx = dy1 @ weight_out1 @ weight_in1.T
+                d_intermediate_1 = torch.mm(dy1, weight_out1)  # [batch*seq, rank1]
+                grad_input_2d = torch.mm(d_intermediate_1, weight_in1.T)  # [batch*seq, hidden_size]
+                grad_input_permuted = grad_input_2d.view(batch_size, seq_len, hidden_size)
+                grad_input = grad_input_permuted[:, inv_perm, :]
+            
+            # 第一个低秩层的梯度
+            if ctx.needs_input_grad[1]:  # weight_in1
+                grad_weight_in1 = torch.mm(input_permuted.view(-1, input_permuted.shape[-1]).T, torch.mm(dy1, weight_out1))
+            
+            if ctx.needs_input_grad[2]:  # weight_out1
+                grad_weight_out1 = torch.mm(dy1.T, intermediate_1)
+            
+            # 第二个低秩层的梯度
+            if ctx.needs_input_grad[3]:  # weight_in2
+                grad_weight_in2 = torch.mm(y2.T, d_intermediate_2)
+            
+            if ctx.needs_input_grad[4]:  # weight_out2
+                grad_weight_out2 = torch.mm(dy3.T, intermediate_2)
+            
+            if ctx.needs_input_grad[5] and bias1 is not None:
+                grad_bias1 = dy1.sum(0)
+            
+            if ctx.needs_input_grad[6] and bias2 is not None:
+                grad_bias2 = dy3.sum(0)
+        else:
+            # Sparse training: Split-GEMM策略
+            if ctx.needs_input_grad[0]:
+                if dx_direct_sparse:
+                    # Direct naive sparse
+                    dy1_naive_sparse = apply_naive_2to4_sparsity(dy1)
+                    d_intermediate_1 = torch.mm(dy1_naive_sparse, weight_out1)
+                    grad_input_2d = torch.mm(d_intermediate_1, weight_in1.T)
+                else:
+                    # Split-GEMM strategy
+                    forward_mask = (y2_forward != 0).float()
+                    dy1_sparse = apply_feature_wise_2to4_sparsity(dy1, forward_mask)
+                    d_intermediate_1 = torch.mm(dy1_sparse, weight_out1)
+                    grad_input_2d = torch.mm(d_intermediate_1, weight_in1.T)
+                
+                grad_input_permuted = grad_input_2d.view(batch_size, seq_len, hidden_size)
+                grad_input = grad_input_permuted[:, inv_perm, :]
+            
+            # 第一个低秩层的梯度 (使用稀疏化的dy1)
+            if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
+                if dx_direct_sparse:
+                    dy1_sparse = apply_naive_2to4_sparsity(dy1)
+                else:
+                    forward_mask = (y2_forward != 0).float()
+                    dy1_sparse = apply_feature_wise_2to4_sparsity(dy1, forward_mask)
+                
+                if ctx.needs_input_grad[1]:  # weight_in1
+                    grad_weight_in1 = torch.mm(input_permuted.view(-1, input_permuted.shape[-1]).T, torch.mm(dy1_sparse, weight_out1))
+                
+                if ctx.needs_input_grad[2]:  # weight_out1
+                    grad_weight_out1 = torch.mm(dy1_sparse.T, intermediate_1)
+            
+            # 第二个低秩层的梯度 (使用Split-GEMM策略)
+            if ctx.needs_input_grad[3]:  # weight_in2
+                grad_weight_in2 = compute_split_gemm_dw2_lowrank(y2, d_intermediate_2, y2_forward, weight_in2)
+            
+            if ctx.needs_input_grad[4]:  # weight_out2
+                grad_weight_out2 = torch.mm(dy3.T, intermediate_2)
+            
+            if ctx.needs_input_grad[5] and bias1 is not None:
+                grad_bias1 = dy1.sum(0)
+            
+            if ctx.needs_input_grad[6] and bias2 is not None:
+                grad_bias2 = dy3.sum(0)
+        
+        # Return gradients for all input parameters
+        return grad_input, grad_weight_in1, grad_weight_out1, grad_weight_in2, grad_weight_out2, grad_bias1, grad_bias2, None, None, None
+    
+    @staticmethod
+    def increment_step():
+        """Increment training step counter for dense warmup"""
+        ActivationSparse2to4LowRankFunction._training_step += 1
+    
+    @staticmethod
+    def get_training_step():
+        """Get current training step"""
+        return ActivationSparse2to4LowRankFunction._training_step
+    
+    @staticmethod
+    def set_warmup_steps(steps):
+        """Set the number of warmup steps"""
+        ActivationSparse2to4LowRankFunction._warmup_steps = steps
+    
+    @staticmethod
+    def get_warmup_steps():
+        """Get the number of warmup steps"""
+        return ActivationSparse2to4LowRankFunction._warmup_steps
 
 
 class ActivationSparse2to4Function(autograd.Function):
@@ -742,16 +1035,36 @@ class LlamaMLP(nn.Module):
                     warmup_steps = 1000
                     dx_direct_sparse = False
                 
-                return ActivationSparse2to4Function.apply(
-                    x,                    # input
-                    self.up_proj.weight,  # weight1 (first linear layer)
-                    self.down_proj.weight, # weight2 (second linear layer)
-                    None,                 # bias1 (up_proj has no bias)
-                    None,                 # bias2 (down_proj has no bias)
-                    sparsity_method,      # sparsity method
-                    warmup_steps,         # warmup steps
-                    dx_direct_sparse      # dx computation method
-                )
+                # Check if we're using LowRankLinear layers
+                
+                is_lowrank = isinstance(self.up_proj, LowRankLinear) and isinstance(self.down_proj, LowRankLinear)
+                
+                if is_lowrank:
+                    # Use low-rank version of activation 2:4 sparsity
+                    return ActivationSparse2to4LowRankFunction.apply(
+                        x,                          # input
+                        self.up_proj.weight_in,     # weight_in1
+                        self.up_proj.weight_out,    # weight_out1
+                        self.down_proj.weight_in,   # weight_in2
+                        self.down_proj.weight_out,  # weight_out2
+                        self.up_proj.bias,          # bias1
+                        self.down_proj.bias,        # bias2
+                        sparsity_method,            # sparsity method
+                        warmup_steps,               # warmup steps
+                        dx_direct_sparse            # dx computation method
+                    )
+                else:
+                    # Use standard version for full-rank layers
+                    return ActivationSparse2to4Function.apply(
+                        x,                    # input
+                        self.up_proj.weight,  # weight1 (first linear layer)
+                        self.down_proj.weight, # weight2 (second linear layer)
+                        None,                 # bias1 (up_proj has no bias)
+                        None,                 # bias2 (down_proj has no bias)
+                        sparsity_method,      # sparsity method
+                        warmup_steps,         # warmup steps
+                        dx_direct_sparse      # dx computation method
+                    )
             else:
                 # Standard forward pass without activation 2:4 sparsity
                 # input -> up_proj -> activation -> down_proj
