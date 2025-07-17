@@ -81,8 +81,7 @@ def parse_args():
     )
     parser.add_argument("--attn_2by4", type=str_to_bool, default=False)
     parser.add_argument("--mlp_2by4", type=str_to_bool, default=True)
-    parser.add_argument("--mlp_up_down", type=str_to_bool, default=False,
-                        help="Apply 2:4 sparsity only to MLP up_proj and down_proj modules (excludes gate_proj)")
+
     parser.add_argument(
         "--enable_2to4_sparse",
         type=str_to_bool,
@@ -776,7 +775,7 @@ def main(args):
         model_size = extract_size_and_type(args.model_config)
         runname = f"{time.strftime('%m%d_%H%M%S')}_gc{args.grad_clipping}_step{args.num_training_steps}_" \
                   f"model{model_size}_ar{args.loro_attn_rank}_loty{args.loro_type}_fr{args.loro_freq}_ls_{args.loro_lr_scaler}_sc{args.scheduler}_crfr{args.cosine_restart_freq}_as{args.lr_adjust_steps}_ra{args.loro_refresh}_rf{args.loro_refresh_freq}_sc_{args.loro_scope}_ini_{args.loro_init}_op_{args.optimizer}_mlr{args.min_lr_ratio}_lr{args.lr}_bs{args.batch_size}_" \
-                  f"tbs{args.total_batch_size}_se_{args.save_every}_ee_{args.eval_every}_24{args.enable_2to4_sparse}_a24{args.attn_2by4}_m24{args.mlp_2by4}_mud{args.mlp_up_down}_" \
+                  f"tbs{args.total_batch_size}_se_{args.save_every}_ee_{args.eval_every}_24{args.enable_2to4_sparse}_a24{args.attn_2by4}_m24{args.mlp_2by4}_" \
                   f"save{args.save_ckpt}_ac{args.activation_2by4}_sf{args.activation_soft_threshold}_act{args.squ_relu}"
         print(f"runname= {runname}")
         runname_dir = os.path.join(args.save_dir, runname)
@@ -861,14 +860,14 @@ def main(args):
                 logger.info("📌 将对注意力模块应用2:4稀疏: " + str(attn_modules))
             
             if args.mlp_2by4:
-                if args.mlp_up_down:
-                    # 只对up_proj和down_proj应用2:4稀疏，排除gate_proj
-                    mlp_modules = ["up_proj", "down_proj"]
-                    logger.info("📌 将对MLP up/down模块应用2:4稀疏: " + str(mlp_modules) + " (排除gate_proj)")
-                else:
-                    # 对所有MLP模块应用2:4稀疏
+                if args.squ_relu == "silu":
+                    # SwiGLU架构：对所有MLP模块应用2:4稀疏 (gate_proj, up_proj, down_proj)
                     mlp_modules = ["gate_proj", "up_proj", "down_proj"]
-                    logger.info("📌 将对MLP模块应用2:4稀疏: " + str(mlp_modules))
+                    logger.info("📌 将对SwiGLU MLP模块应用2:4稀疏: " + str(mlp_modules))
+                else:
+                    # 非SwiGLU架构（relu/relu2）：只有up_proj和down_proj，没有gate_proj
+                    mlp_modules = ["up_proj", "down_proj"]
+                    logger.info("📌 将对非SwiGLU MLP模块应用2:4稀疏: " + str(mlp_modules) + " (无gate_proj)")
                 target_modules.extend(mlp_modules)
 
             logger.info(f"🎯 最终目标模块列表: {target_modules}")
@@ -1088,14 +1087,14 @@ def main(args):
                 logger.info("📌 将对注意力模块应用2:4稀疏: " + str(attn_modules))
             
             if args.mlp_2by4:
-                if args.mlp_up_down:
-                    # 只对up_proj和down_proj应用2:4稀疏，排除gate_proj
-                    mlp_modules = ["up_proj", "down_proj"]
-                    logger.info("📌 将对MLP up/down模块应用2:4稀疏: " + str(mlp_modules) + " (排除gate_proj)")
-                else:
-                    # 对所有MLP模块应用2:4稀疏
+                if args.squ_relu == "silu":
+                    # SwiGLU架构：对所有MLP模块应用2:4稀疏 (gate_proj, up_proj, down_proj)
                     mlp_modules = ["gate_proj", "up_proj", "down_proj"]
-                    logger.info("📌 将对MLP模块应用2:4稀疏: " + str(mlp_modules))
+                    logger.info("📌 将对SwiGLU MLP模块应用2:4稀疏: " + str(mlp_modules))
+                else:
+                    # 非SwiGLU架构（relu/relu2）：只有up_proj和down_proj，没有gate_proj
+                    mlp_modules = ["up_proj", "down_proj"]
+                    logger.info("📌 将对非SwiGLU MLP模块应用2:4稀疏: " + str(mlp_modules) + " (无gate_proj)")
                 target_modules.extend(mlp_modules)
             
             if not target_modules:
