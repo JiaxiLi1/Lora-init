@@ -144,20 +144,119 @@ def compute_split_gemm_dw2(y2, dy3, y2_forward):
     return dw2
 
 
-def compute_split_gemm_dx(dy1_sparse, weight1, forward_mask):
+def compute_split_gemm_dx(dy1, weight1, forward_mask):
     """
-    计算 dx 使用 Split-GEMM 策略
-    dx = dy1 @ w1.T，但使用稀疏化的dy1
+    计算 dx 使用 Split-GEMM 策略 (正确实现)
+    dx = dy1 @ w1.T，使用95%/5%特征分割
+    
+    原理：
+    1. 分析dy1的特征稀疏性，将特征分为稀疏(95%)和稠密(5%)两组
+    2. 稀疏组：feature-wise 2:4稀疏化 → 2:4 sparse GEMM  
+    3. 稠密组：保持原始值 → dense GEMM
+    4. 合并结果
     """
-    return torch.mm(dy1_sparse, weight1)
+    batch_seq_len, hidden_size = dy1.shape
+    weight_out_dim, weight_in_dim = weight1.shape  # weight1: [hidden_size, intermediate_size] for dx computation
+    
+    # Step 1: 分析特征稀疏性 (feature-wise sparsity analysis)
+    feature_sparsity = torch.mean((dy1 != 0).float(), dim=0)  # [hidden_size]
+    
+    # Step 2: 选择95%的特征作为稀疏特征 (select 95% features for sparsification)
+    num_sparse_features = int(0.95 * hidden_size)
+    sparsity_threshold = 0.75  # 稀疏度阈值：>75%稀疏的特征才能被2:4稀疏化
+    
+    # 找到足够稀疏的特征
+    sparse_enough_mask = feature_sparsity > sparsity_threshold
+    
+    if sparse_enough_mask.sum() >= num_sparse_features:
+        # 如果有足够的稀疏特征，选择最稀疏的num_sparse_features个
+        _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
+    else:
+        # 如果稀疏特征不够，选择所有足够稀疏的特征
+        sparse_indices = torch.where(sparse_enough_mask)[0]
+    
+    # Step 3: 创建稀疏和稠密特征的mask
+    sparse_mask = torch.zeros(hidden_size, dtype=torch.bool, device=dy1.device)
+    if len(sparse_indices) > 0:
+        sparse_mask[sparse_indices] = True
+    dense_mask = ~sparse_mask
+    
+    # Step 4: Split-GEMM计算
+    dx = torch.zeros(batch_seq_len, weight_in_dim, device=dy1.device, dtype=dy1.dtype)
+    
+    # 稀疏部分：feature-wise 2:4稀疏化 + sparse GEMM
+    if sparse_mask.any():
+        dy1_sparse_part = dy1[:, sparse_mask]  # [batch_seq_len, num_sparse_features]
+        
+        # Feature-wise 2:4 sparsification (transpose for feature-wise operation)
+        dy1_sparse_part_t = dy1_sparse_part.t()  # [num_sparse_features, batch_seq_len]
+        dy1_sparse_2to4_t = apply_naive_2to4_sparsity_featurewise(dy1_sparse_part_t)
+        dy1_sparse_2to4 = dy1_sparse_2to4_t.t()  # [batch_seq_len, num_sparse_features]
+        
+        # 2:4 Sparse GEMM: dx_sparse = dy1_sparse_2to4 @ w1[sparse_mask, :].T
+        weight1_sparse = weight1[sparse_mask, :]  # [num_sparse_features, intermediate_size]
+        dx += torch.mm(dy1_sparse_2to4, weight1_sparse)
+    
+    # 稠密部分：dense GEMM 
+    if dense_mask.any():
+        dy1_dense_part = dy1[:, dense_mask]  # [batch_seq_len, num_dense_features]
+        weight1_dense = weight1[dense_mask, :]  # [num_dense_features, intermediate_size]
+        dx += torch.mm(dy1_dense_part, weight1_dense)
+    
+    return dx
 
 
-def compute_split_gemm_dw1(input_2d, dy1_sparse, forward_mask):
+def compute_split_gemm_dw1(input_2d, dy1, forward_mask):
     """
-    计算 dw1 使用 Split-GEMM 策略
-    dw1 = dy1.T @ input，但使用稀疏化的dy1
+    计算 dw1 使用 Split-GEMM 策略 (正确实现)
+    dw1 = dy1.T @ input，使用95%/5%特征分割
+    
+    原理同上，但计算的是权重梯度
     """
-    return torch.mm(dy1_sparse.t(), input_2d)
+    batch_seq_len, input_dim = input_2d.shape
+    _, hidden_size = dy1.shape
+    
+    # Step 1: 分析特征稀疏性
+    feature_sparsity = torch.mean((dy1 != 0).float(), dim=0)  # [hidden_size]
+    
+    # Step 2: 选择95%的特征作为稀疏特征
+    num_sparse_features = int(0.95 * hidden_size)
+    sparsity_threshold = 0.75
+    
+    sparse_enough_mask = feature_sparsity > sparsity_threshold
+    
+    if sparse_enough_mask.sum() >= num_sparse_features:
+        _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
+    else:
+        sparse_indices = torch.where(sparse_enough_mask)[0]
+    
+    # Step 3: 创建mask
+    sparse_mask = torch.zeros(hidden_size, dtype=torch.bool, device=dy1.device)
+    if len(sparse_indices) > 0:
+        sparse_mask[sparse_indices] = True
+    dense_mask = ~sparse_mask
+    
+    # Step 4: Split-GEMM计算
+    dw1 = torch.zeros(hidden_size, input_dim, device=dy1.device, dtype=dy1.dtype)
+    
+    # 稀疏部分：feature-wise 2:4稀疏化
+    if sparse_mask.any():
+        dy1_sparse_part = dy1[:, sparse_mask]  # [batch_seq_len, num_sparse_features]
+        
+        # Feature-wise 2:4 sparsification
+        dy1_sparse_part_t = dy1_sparse_part.t()  # [num_sparse_features, batch_seq_len]
+        dy1_sparse_2to4_t = apply_naive_2to4_sparsity_featurewise(dy1_sparse_part_t)
+        dy1_sparse_2to4 = dy1_sparse_2to4_t.t()  # [batch_seq_len, num_sparse_features]
+        
+        # Compute gradient: dw1_sparse = dy1_sparse_2to4.T @ input
+        dw1[sparse_mask, :] = torch.mm(dy1_sparse_2to4.t(), input_2d)
+    
+    # 稠密部分：dense GEMM
+    if dense_mask.any():
+        dy1_dense_part = dy1[:, dense_mask]  # [batch_seq_len, num_dense_features]
+        dw1[dense_mask, :] = torch.mm(dy1_dense_part.t(), input_2d)
+    
+    return dw1
 
 
 def apply_naive_2to4_sparsity_featurewise(input_tensor):
@@ -200,16 +299,7 @@ def apply_naive_2to4_sparsity_featurewise(input_tensor):
     return output
 
 
-class SquaredReLUActivation(nn.Module):
-    """
-    Squared ReLU activation function: f(x) = x^2 if x > 0, else 0
-    This is used as an alternative to SwiGLU in MLP layers.
-    """
-    def __init__(self):
-        super().__init__()
 
-    def forward(self, x):
-        return torch.where(x > 0, x * x, torch.zeros_like(x))
 
 
 class ActivationSparse2to4LowRankFunction(autograd.Function):
@@ -235,6 +325,14 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
     # Training step counter for dense warmup
     _training_step = 0
     _warmup_steps = 1000  # Default value, can be overridden
+    
+    @staticmethod
+    def _record_activation_sparsity_static(activated_tensor, layer_id=None):
+        """
+        Static method to record activation sparsity (called from forward pass) - LowRank version
+        """
+        # Delegate to the standard version
+        ActivationSparse2to4Function._record_activation_sparsity_static(activated_tensor, layer_id)
     
     @staticmethod
     @custom_fwd
@@ -291,6 +389,11 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
         # Step 3: 平方ReLU激活函数 (Squared-ReLU Activation)
         # y2 = ReLU²(y1)
         y2 = torch.where(y1 > 0, y1 * y1, torch.zeros_like(y1))
+        
+        # Record sparsity statistics if enabled (check via config)
+        if hasattr(ActivationSparse2to4LowRankFunction, '_wandb_sparsityrelu_enabled') and ActivationSparse2to4LowRankFunction._wandb_sparsityrelu_enabled:
+            # Record sparsity for this layer
+            ActivationSparse2to4LowRankFunction._record_activation_sparsity_static(y2)
         
         # Dense warmup for first N iterations
         if ActivationSparse2to4LowRankFunction._training_step < ActivationSparse2to4LowRankFunction._warmup_steps:
@@ -402,34 +505,48 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
         else:
             # Sparse training: Split-GEMM策略
             if ctx.needs_input_grad[0]:
+                forward_mask = (y2_forward != 0).float()
+                
                 if dx_direct_sparse:
                     # Direct naive sparse
                     dy1_naive_sparse = apply_naive_2to4_sparsity(dy1)
                     d_intermediate_1 = torch.mm(dy1_naive_sparse, weight_out1)
                     grad_input_2d = torch.mm(d_intermediate_1, weight_in1.T)
                 else:
-                    # Split-GEMM strategy
-                    forward_mask = (y2_forward != 0).float()
-                    dy1_sparse = apply_feature_wise_2to4_sparsity(dy1, forward_mask)
-                    d_intermediate_1 = torch.mm(dy1_sparse, weight_out1)
+                    # Split-GEMM strategy: 使用95%/5%特征分割策略
+                    # 对于低秩层：dx = dy1 @ weight_out1 @ weight_in1.T
+                    # 使用Split-GEMM策略计算 dy1 @ weight_out1
+                    d_intermediate_1 = compute_split_gemm_lowrank_intermediate(dy1, weight_out1, forward_mask)
                     grad_input_2d = torch.mm(d_intermediate_1, weight_in1.T)
                 
                 grad_input_permuted = grad_input_2d.view(batch_size, seq_len, hidden_size)
                 grad_input = grad_input_permuted[:, inv_perm, :]
             
-            # 第一个低秩层的梯度 (使用稀疏化的dy1)
+            # 第一个低秋层的梯度 (使用Split-GEMM策略)
             if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
-                if dx_direct_sparse:
-                    dy1_sparse = apply_naive_2to4_sparsity(dy1)
-                else:
-                    forward_mask = (y2_forward != 0).float()
-                    dy1_sparse = apply_feature_wise_2to4_sparsity(dy1, forward_mask)
-                
-                if ctx.needs_input_grad[1]:  # weight_in1
-                    grad_weight_in1 = torch.mm(input_permuted.view(-1, input_permuted.shape[-1]).T, torch.mm(dy1_sparse, weight_out1))
-                
-                if ctx.needs_input_grad[2]:  # weight_out1
-                    grad_weight_out1 = torch.mm(dy1_sparse.T, intermediate_1)
+                 forward_mask = (y2_forward != 0).float()
+                 
+                 if ctx.needs_input_grad[1]:  # weight_in1
+                     # For low-rank: grad_weight_in1 = input.T @ (dy1 @ weight_out1)
+                     if dx_direct_sparse:
+                         # Direct sparse method: 简单的token-wise稀疏化
+                         dy1_sparse = apply_naive_2to4_sparsity(dy1)
+                         d_intermediate_1_for_w_in1 = torch.mm(dy1_sparse, weight_out1)
+                     else:
+                         # Split-GEMM strategy: 95%/5%特征分割策略
+                         d_intermediate_1_for_w_in1 = compute_split_gemm_lowrank_intermediate(dy1, weight_out1, forward_mask)
+                     grad_weight_in1 = torch.mm(input_permuted.view(-1, input_permuted.shape[-1]).T, d_intermediate_1_for_w_in1)
+                 
+                 if ctx.needs_input_grad[2]:  # weight_out1  
+                     # For low-rank: grad_weight_out1 = dy1.T @ intermediate_1
+                     if dx_direct_sparse:
+                         # Direct sparse method: 简单的token-wise稀疏化
+                         dy1_sparse = apply_naive_2to4_sparsity(dy1)
+                         grad_weight_out1 = torch.mm(dy1_sparse.T, intermediate_1)
+                     else:
+                         # Split-GEMM strategy: 95%/5%特征分割策略
+                         dy1_split_gemm = apply_split_gemm_to_dy1(dy1, forward_mask)
+                         grad_weight_out1 = torch.mm(dy1_split_gemm.T, intermediate_1)
             
             # 第二个低秩层的梯度 (使用Split-GEMM策略)
             if ctx.needs_input_grad[3]:  # weight_in2
@@ -466,6 +583,14 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
     def get_warmup_steps():
         """Get the number of warmup steps"""
         return ActivationSparse2to4LowRankFunction._warmup_steps
+    
+    @staticmethod
+    def _record_activation_sparsity_static(activated_tensor):
+        """
+        Static method to record activation sparsity statistics (same as standard version)
+        """
+        # Reuse the same method from ActivationSparse2to4Function
+        ActivationSparse2to4Function._record_activation_sparsity_static(activated_tensor)
 
 
 class ActivationSparse2to4Function(autograd.Function):
@@ -495,6 +620,68 @@ class ActivationSparse2to4Function(autograd.Function):
     # Training step counter for dense warmup
     _training_step = 0
     _warmup_steps = 1000  # Default value, can be overridden
+    
+    @staticmethod
+    def _record_activation_sparsity_static(activated_tensor, layer_id=None):
+        """
+        Static method to record activation sparsity (called from forward pass)
+        """
+        print("🚀 DEBUGGING: START")
+        print(f"🚀 DEBUGGING: _record_activation_sparsity_static 被调用!")
+        try:
+            # Get current training step from the class variable set by main training loop
+            current_step = getattr(ActivationSparse2to4Function, '_global_training_step', 0)
+            print(f"🚀 DEBUGGING: current_step = {current_step}")
+        except Exception as e:
+            print(f"🚀 DEBUGGING: getattr failed: {e}")
+            current_step = 0
+        
+        # Record every step for testing (later change to every 10 steps)
+        # if current_step % 10 != 0:
+        #     return
+            
+        # Initialize recording state for this step if needed
+        if not hasattr(ActivationSparse2to4Function, '_last_recorded_step'):
+            ActivationSparse2to4Function._last_recorded_step = -1
+            ActivationSparse2to4Function._current_step_layer_count = 0
+        
+        # Reset layer counter for new step
+        if ActivationSparse2to4Function._last_recorded_step != current_step:
+            ActivationSparse2to4Function._last_recorded_step = current_step
+            ActivationSparse2to4Function._current_step_layer_count = 0
+            
+            # Clear previous step's stats when starting a new step
+            if hasattr(LlamaMLP, '_sparsity_stats'):
+                LlamaMLP._sparsity_stats.clear()
+        
+        # For standard MLP layers, we also need to reset layer registry when step changes
+        # This ensures layer numbering is consistent across activation sparse and standard MLP
+        if hasattr(LlamaMLP, '_layer_registry') and current_step != getattr(LlamaMLP, '_last_step_processed', -1):
+            LlamaMLP._layer_registry.clear()
+            LlamaMLP._last_step_processed = current_step
+        
+        # Use the layer count for this step as layer_id (0-11 for 12 layers)
+        if layer_id is None:
+            layer_id = ActivationSparse2to4Function._current_step_layer_count
+        
+        ActivationSparse2to4Function._current_step_layer_count += 1
+        
+        with torch.no_grad():
+            # Calculate sparsity (percentage of zero values)
+            total_elements = activated_tensor.numel()
+            zero_elements = (activated_tensor == 0).sum().item()
+            sparsity = zero_elements / total_elements
+            
+            # Store in the global sparsity stats (will be uploaded by main loop)
+            if not hasattr(LlamaMLP, '_sparsity_stats'):
+                LlamaMLP._sparsity_stats = {}
+                
+            LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_id}'] = sparsity
+            LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_id}_total_elements'] = total_elements
+            LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_id}_zero_elements'] = zero_elements
+            
+            # Debug info
+            print(f"🔍 ActivationSparse2to4Function: Step {current_step}, Layer {layer_id}, Sparsity: {sparsity:.4f}")
     
     @staticmethod
     @custom_fwd
@@ -548,6 +735,51 @@ class ActivationSparse2to4Function(autograd.Function):
         # Step 3: 平方ReLU激活函数 (Squared-ReLU Activation)
         # y2 = ReLU²(y1)
         y2 = torch.where(y1 > 0, y1 * y1, torch.zeros_like(y1))
+        
+        # Record sparsity statistics if enabled (check via config)
+        # We need to check if wandb_sparsityrelu is enabled in the model config
+        # Since we don't have direct access to config here, we'll check via a class variable
+        wandb_enabled = hasattr(ActivationSparse2to4Function, '_wandb_sparsityrelu_enabled') and ActivationSparse2to4Function._wandb_sparsityrelu_enabled
+        if wandb_enabled:
+            # Record sparsity statistics directly inline (working version)
+            try:
+                # Get current training step
+                current_step = getattr(ActivationSparse2to4Function, '_global_training_step', 0)
+                
+                # Initialize recording state for this step if needed
+                if not hasattr(ActivationSparse2to4Function, '_last_recorded_step'):
+                    ActivationSparse2to4Function._last_recorded_step = -1
+                    ActivationSparse2to4Function._current_step_layer_count = 0
+                
+                # Reset layer counter for new step
+                if ActivationSparse2to4Function._last_recorded_step != current_step:
+                    ActivationSparse2to4Function._last_recorded_step = current_step
+                    ActivationSparse2to4Function._current_step_layer_count = 0
+                    
+                    # Clear previous step's stats when starting a new step
+                    if hasattr(LlamaMLP, '_sparsity_stats'):
+                        LlamaMLP._sparsity_stats.clear()
+                
+                # Get layer ID
+                layer_id = ActivationSparse2to4Function._current_step_layer_count
+                ActivationSparse2to4Function._current_step_layer_count += 1
+                
+                # Calculate sparsity (percentage of zero values)
+                with torch.no_grad():
+                    total_elements = y2.numel()
+                    zero_elements = (y2 == 0).sum().item()
+                    sparsity = zero_elements / total_elements
+                    
+                    # Store in the global sparsity stats
+                    if not hasattr(LlamaMLP, '_sparsity_stats'):
+                        LlamaMLP._sparsity_stats = {}
+                        
+                    LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_id}'] = sparsity
+                    
+            except Exception as e:
+                print(f"❌ 稀疏度记录失败: {e}")
+                import traceback
+                traceback.print_exc()
         
         # # 数值稳定性处理：如果y2的值太大，进行缩放
         # max_val = y2.abs().max().item()
@@ -670,9 +902,7 @@ class ActivationSparse2to4Function(autograd.Function):
             
             # Step 5: 计算 W1 的梯度 (dw1) 和 X 的梯度 (dx) - Split-GEMM策略
             if ctx.needs_input_grad[0] or ctx.needs_input_grad[1]:
-                # Apply feature-wise 2:4 sparsity to dy1 for Split-GEMM
                 forward_mask = (y2_forward != 0).float()
-                dy1_sparse = apply_feature_wise_2to4_sparsity(dy1, forward_mask)
                 
                 if ctx.needs_input_grad[0]:
                     if dx_direct_sparse:
@@ -680,13 +910,21 @@ class ActivationSparse2to4Function(autograd.Function):
                         dy1_naive_sparse = apply_naive_2to4_sparsity(dy1)
                         grad_input_2d = torch.mm(dy1_naive_sparse, weight1)
                     else:
-                        # Split-GEMM strategy as described in paper
-                        grad_input_2d = compute_split_gemm_dx(dy1_sparse, weight1, forward_mask)
+                        # Split-GEMM strategy: 95% sparse + 5% dense
+                        grad_input_2d = compute_split_gemm_dx(dy1, weight1, forward_mask)
                     grad_input_permuted = grad_input_2d.view(batch_size, seq_len, hidden_size)
                     grad_input = grad_input_permuted[:, inv_perm, :]
                 
                 if ctx.needs_input_grad[1]:
-                    grad_weight1 = compute_split_gemm_dw1(input_permuted.view(-1, input_permuted.shape[-1]), dy1_sparse, forward_mask)
+                    # Split-GEMM strategy for weight gradient
+                    grad_weight1 = compute_split_gemm_dw1(input_permuted.view(-1, input_permuted.shape[-1]), dy1, forward_mask)
+                    # if dx_direct_sparse:
+                    #     # Direct sparse method: 使用简单的token-wise稀疏化
+                    #     dy1_sparse = apply_naive_2to4_sparsity(dy1)
+                    #     grad_weight1 = torch.mm(dy1_sparse.t(), input_permuted.view(-1, input_permuted.shape[-1]))
+                    # else:
+                    #     # Split-GEMM strategy: 使用95%/5%特征分割策略
+                    #     grad_weight1 = compute_split_gemm_dw1(input_permuted.view(-1, input_permuted.shape[-1]), dy1, forward_mask)
             
             # Bias gradients
             if ctx.needs_input_grad[3] and bias1 is not None:
@@ -717,6 +955,37 @@ class ActivationSparse2to4Function(autograd.Function):
     def get_warmup_steps():
         """Get the number of warmup steps"""
         return ActivationSparse2to4Function._warmup_steps
+    
+    @staticmethod
+    def _record_activation_sparsity_static(activated_tensor):
+        """
+        Static method to record activation sparsity statistics
+        """
+        with torch.no_grad():
+            # Calculate sparsity (percentage of zero values)
+            total_elements = activated_tensor.numel()
+            zero_elements = (activated_tensor == 0).sum().item()
+            sparsity = zero_elements / total_elements
+            
+            # Get layer index using a simple registry (reuse LlamaMLP registry)
+            if not hasattr(LlamaMLP, '_layer_registry'):
+                LlamaMLP._layer_registry = {}
+                LlamaMLP._current_sparsities = {}
+            
+            # For activation sparse functions, use a special key
+            layer_key = f"activation_sparse_{len(LlamaMLP._current_sparsities)}"
+            if layer_key not in LlamaMLP._current_sparsities:
+                layer_idx = len(LlamaMLP._layer_registry)
+                LlamaMLP._layer_registry[layer_key] = layer_idx
+            else:
+                layer_idx = LlamaMLP._layer_registry[layer_key]
+            
+            # Store latest sparsity for this layer
+            LlamaMLP._current_sparsities[layer_idx] = {
+                'sparsity': sparsity,
+                'total_elements': total_elements,
+                'zero_elements': zero_elements
+            }
 
 
 def apply_naive_2to4_sparsity(input_tensor):
@@ -803,6 +1072,176 @@ def apply_soft_threshold_2to4_sparsity(input_tensor, scale):
         output = output_temp * scale
     
     return output
+
+
+def compute_split_gemm_lowrank_intermediate(dy1, weight_out1, forward_mask):
+    """
+    为低秩层计算 dy1 @ weight_out1，使用Split-GEMM策略
+    """
+    batch_seq_len, hidden_size = dy1.shape
+    _, rank1 = weight_out1.shape
+    
+    # 分析特征稀疏性
+    feature_sparsity = torch.mean((dy1 != 0).float(), dim=0)
+    num_sparse_features = int(0.95 * hidden_size)
+    sparsity_threshold = 0.75
+    
+    sparse_enough_mask = feature_sparsity > sparsity_threshold
+    
+    if sparse_enough_mask.sum() >= num_sparse_features:
+        _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
+    else:
+        sparse_indices = torch.where(sparse_enough_mask)[0]
+    
+    sparse_mask = torch.zeros(hidden_size, dtype=torch.bool, device=dy1.device)
+    if len(sparse_indices) > 0:
+        sparse_mask[sparse_indices] = True
+    dense_mask = ~sparse_mask
+    
+    # Split-GEMM计算
+    result = torch.zeros(batch_seq_len, rank1, device=dy1.device, dtype=dy1.dtype)
+    
+    # 稀疏部分
+    if sparse_mask.any():
+        dy1_sparse_part = dy1[:, sparse_mask]
+        dy1_sparse_part_t = dy1_sparse_part.t()
+        dy1_sparse_2to4_t = apply_naive_2to4_sparsity_featurewise(dy1_sparse_part_t)
+        dy1_sparse_2to4 = dy1_sparse_2to4_t.t()
+        
+        weight_out1_sparse = weight_out1[sparse_mask, :]
+        result += torch.mm(dy1_sparse_2to4, weight_out1_sparse)
+    
+    # 稠密部分
+    if dense_mask.any():
+        dy1_dense_part = dy1[:, dense_mask]
+        weight_out1_dense = weight_out1[dense_mask, :]
+        result += torch.mm(dy1_dense_part, weight_out1_dense)
+    
+    return result
+
+
+def apply_split_gemm_to_dy1(dy1, forward_mask):
+    """
+    对dy1应用Split-GEMM策略的稀疏化
+    """
+    batch_seq_len, hidden_size = dy1.shape
+    
+    # 分析特征稀疏性
+    feature_sparsity = torch.mean((dy1 != 0).float(), dim=0)
+    num_sparse_features = int(0.95 * hidden_size)
+    sparsity_threshold = 0.75
+    
+    sparse_enough_mask = feature_sparsity > sparsity_threshold
+    
+    if sparse_enough_mask.sum() >= num_sparse_features:
+        _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
+    else:
+        sparse_indices = torch.where(sparse_enough_mask)[0]
+    
+    sparse_mask = torch.zeros(hidden_size, dtype=torch.bool, device=dy1.device)
+    if len(sparse_indices) > 0:
+        sparse_mask[sparse_indices] = True
+    dense_mask = ~sparse_mask
+    
+    # 应用Split-GEMM策略
+    dy1_result = dy1.clone()
+    
+    # 对稀疏部分应用feature-wise 2:4稀疏化
+    if sparse_mask.any():
+        dy1_sparse_part = dy1[:, sparse_mask]
+        dy1_sparse_part_t = dy1_sparse_part.t()
+        dy1_sparse_2to4_t = apply_naive_2to4_sparsity_featurewise(dy1_sparse_part_t)
+        dy1_sparse_2to4 = dy1_sparse_2to4_t.t()
+        dy1_result[:, sparse_mask] = dy1_sparse_2to4
+    
+    # 稠密部分保持不变
+    
+    return dy1_result
+
+
+def compute_split_gemm_lowrank_intermediate(dy1, weight_out1, forward_mask):
+    """
+    为低秩层计算 dy1 @ weight_out1，使用Split-GEMM策略
+    """
+    batch_seq_len, hidden_size = dy1.shape
+    _, rank1 = weight_out1.shape
+    
+    # 分析特征稀疏性
+    feature_sparsity = torch.mean((dy1 != 0).float(), dim=0)
+    num_sparse_features = int(0.95 * hidden_size)
+    sparsity_threshold = 0.75
+    
+    sparse_enough_mask = feature_sparsity > sparsity_threshold
+    
+    if sparse_enough_mask.sum() >= num_sparse_features:
+        _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
+    else:
+        sparse_indices = torch.where(sparse_enough_mask)[0]
+    
+    sparse_mask = torch.zeros(hidden_size, dtype=torch.bool, device=dy1.device)
+    if len(sparse_indices) > 0:
+        sparse_mask[sparse_indices] = True
+    dense_mask = ~sparse_mask
+    
+    # Split-GEMM计算
+    result = torch.zeros(batch_seq_len, rank1, device=dy1.device, dtype=dy1.dtype)
+    
+    # 稀疏部分
+    if sparse_mask.any():
+        dy1_sparse_part = dy1[:, sparse_mask]
+        dy1_sparse_part_t = dy1_sparse_part.t()
+        dy1_sparse_2to4_t = apply_naive_2to4_sparsity_featurewise(dy1_sparse_part_t)
+        dy1_sparse_2to4 = dy1_sparse_2to4_t.t()
+        
+        weight_out1_sparse = weight_out1[sparse_mask, :]
+        result += torch.mm(dy1_sparse_2to4, weight_out1_sparse)
+    
+    # 稠密部分
+    if dense_mask.any():
+        dy1_dense_part = dy1[:, dense_mask]
+        weight_out1_dense = weight_out1[dense_mask, :]
+        result += torch.mm(dy1_dense_part, weight_out1_dense)
+    
+    return result
+
+
+def apply_split_gemm_to_dy1(dy1, forward_mask):
+    """
+    对dy1应用Split-GEMM策略的稀疏化
+    """
+    batch_seq_len, hidden_size = dy1.shape
+    
+    # 分析特征稀疏性
+    feature_sparsity = torch.mean((dy1 != 0).float(), dim=0)
+    num_sparse_features = int(0.95 * hidden_size)
+    sparsity_threshold = 0.75
+    
+    sparse_enough_mask = feature_sparsity > sparsity_threshold
+    
+    if sparse_enough_mask.sum() >= num_sparse_features:
+        _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
+    else:
+        sparse_indices = torch.where(sparse_enough_mask)[0]
+    
+    sparse_mask = torch.zeros(hidden_size, dtype=torch.bool, device=dy1.device)
+    if len(sparse_indices) > 0:
+        sparse_mask[sparse_indices] = True
+    dense_mask = ~sparse_mask
+    
+    # 应用Split-GEMM策略
+    dy1_result = dy1.clone()
+    
+    # 对稀疏部分应用feature-wise 2:4稀疏化
+    if sparse_mask.any():
+        dy1_sparse_part = dy1[:, sparse_mask]
+        dy1_sparse_part_t = dy1_sparse_part.t()
+        dy1_sparse_2to4_t = apply_naive_2to4_sparsity_featurewise(dy1_sparse_part_t)
+        dy1_sparse_2to4 = dy1_sparse_2to4_t.t()
+        dy1_result[:, sparse_mask] = dy1_sparse_2to4
+    
+    # 稠密部分保持不变
+    
+    return dy1_result
 
 
 def apply_feature_wise_2to4_sparsity(grad_tensor, forward_mask):
@@ -1013,6 +1452,72 @@ class LlamaMLP(nn.Module):
             
             print(f"🔧 Parameter count maintained: original={3 * hidden_size * intermediate_size}, new={2 * hidden_size * self.new_intermediate_size}")
 
+    def record_activation_sparsity(self, activated_tensor):
+        """
+        Record sparsity statistics of activated tensor (called every 10 steps)
+        
+        Args:
+            activated_tensor: Tensor after activation function [batch*seq, intermediate_size]
+        """
+        with torch.no_grad():
+            # Calculate sparsity (percentage of zero values)
+            total_elements = activated_tensor.numel()
+            zero_elements = (activated_tensor == 0).sum().item()
+            sparsity = zero_elements / total_elements
+            
+            # Get layer index using a simple registry
+            if not hasattr(LlamaMLP, '_layer_registry'):
+                LlamaMLP._layer_registry = {}
+            
+            layer_id = id(self)
+            if layer_id not in LlamaMLP._layer_registry:
+                LlamaMLP._layer_registry[layer_id] = len(LlamaMLP._layer_registry)
+            
+            layer_idx = LlamaMLP._layer_registry[layer_id]
+            
+            # Store in the global sparsity stats (same format as ActivationSparse2to4Function)
+            if not hasattr(LlamaMLP, '_sparsity_stats'):
+                LlamaMLP._sparsity_stats = {}
+                
+            LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_idx}'] = sparsity
+            
+            # Debug info
+            current_step = getattr(LlamaMLP, '_current_training_step', 0)
+            print(f"🔍 Standard MLP: Step {current_step}, Layer {layer_idx}, Sparsity: {sparsity:.4f}")
+
+    @classmethod
+    def get_sparsity_stats(cls):
+        """
+        Get current sparsity statistics for all layers
+        Returns dict suitable for wandb logging
+        """
+        if not hasattr(cls, '_sparsity_stats') or not cls._sparsity_stats:
+            return {}
+        
+        # Start with the stats we have
+        wandb_dict = cls._sparsity_stats.copy()
+        
+        # Calculate aggregated statistics
+        all_sparsities = []
+        for key, value in cls._sparsity_stats.items():
+            if key.startswith("sparsity_relu/layer_"):
+                all_sparsities.append(value)
+        
+        # Add mean statistics
+        if all_sparsities:
+            wandb_dict["sparsity_relu/mean_across_layers"] = sum(all_sparsities) / len(all_sparsities)
+            
+            # Clear the stats after reading them
+            cls._sparsity_stats.clear()
+        
+        return wandb_dict
+
+    @classmethod
+    def clear_sparsity_stats(cls):
+        """Clear sparsity statistics"""
+        if hasattr(cls, '_sparsity_stats'):
+            cls._sparsity_stats.clear()
+
     def forward(self, x):
         if self.architecture_type == 'silu':
             # Original SwiGLU architecture: gate_proj * silu(up_proj) -> down_proj
@@ -1021,6 +1526,8 @@ class LlamaMLP(nn.Module):
             # New architecture without gate projection
             config = getattr(self, 'config', None)
             use_activation_2by4 = getattr(config, 'activation_2by4', False) if config is not None else False
+            
+
             
             if use_activation_2by4 and self.architecture_type == 'relu2':
                 # Use activation 2:4 sparsity with squared ReLU
@@ -1068,7 +1575,17 @@ class LlamaMLP(nn.Module):
             else:
                 # Standard forward pass without activation 2:4 sparsity
                 # input -> up_proj -> activation -> down_proj
-                return self.down_proj(self.act_fn(self.up_proj(x)))
+                up_output = self.up_proj(x)
+                activated = self.act_fn(up_output)
+                
+                # Record sparsity statistics if enabled (will be uploaded later by main loop)
+                config = getattr(self, 'config', None)
+                if config is not None and getattr(config, 'wandb_sparsityrelu', False):
+                    # Record sparsity for every forward pass during training
+                    # (frequency control is handled in the main training loop)
+                    self.record_activation_sparsity(activated)
+                
+                return self.down_proj(activated)
 
 
 class LlamaAttention(nn.Module):

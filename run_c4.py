@@ -28,12 +28,19 @@ from loguru import logger
 
 from peft_pretraining import training_utils, args_utils
 from peft_pretraining.dataloader import PreprocessedIterableDataset
-from peft_pretraining.modeling_llama import LlamaForCausalLM
+from peft_pretraining.modeling_llama import LlamaForCausalLM, LlamaMLP
 
 import bitsandbytes as bnb
 from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor
-from peft_pretraining.modeling_llama import ActivationSparse2to4Function, ActivationSparse2to4LowRankFunction
 from loro_torch.loro_optim import LOROAdamW
+from loro_torch.lowrank_module import LowRankLinear
+
+# Import activation sparse functions (moved to top to avoid UnboundLocalError)
+try:
+    from peft_pretraining.modeling_llama import ActivationSparse2to4Function, ActivationSparse2to4LowRankFunction
+except ImportError:
+    ActivationSparse2to4Function = None
+    ActivationSparse2to4LowRankFunction = None
 
 from sparse_fullrank_linear import (
     apply_sparse2to4_to_model,
@@ -131,6 +138,12 @@ def parse_args():
         type=str_to_bool,
         default=False,
         help="If True, use direct naive sparse for dx computation instead of split-GEMM strategy in backward pass"
+    )
+    parser.add_argument(
+        "--wandb_sparsityrelu",
+        type=str_to_bool,
+        default=False,
+        help="If True, log sparsity statistics of activations after ReLU/ReLU² to wandb for each layer"
     )
     parser.add_argument("--c4_local", type=str_to_bool, default=True)
     parser.add_argument("--train_data_path", type=str, default="en/c4-train.*.json.gz",
@@ -548,6 +561,93 @@ def check_gradient_health(model, step):
     
     return health_status
 
+def get_weight_sparsity_stats(model):
+    """
+    计算模型中所有权重矩阵的稀疏度
+    
+    Args:
+        model: LlamaForCausalLM模型
+        
+    Returns:
+        dict: 包含所有权重矩阵稀疏度的字典
+    """
+    sparsity_stats = {}
+    
+    with torch.no_grad():
+        # 获取原始模型 (处理DistributedDataParallel包装)
+        if hasattr(model, 'module'):
+            # 分布式训练模式
+            actual_model = model.module
+        else:
+            # 单GPU模式
+            actual_model = model
+        
+        # 遍历所有transformer layers
+        for layer_idx, layer in enumerate(actual_model.model.layers):
+            # Attention权重
+            attention = layer.self_attn
+            
+            # 检查是否是LowRankLinear
+            
+            # Q, K, V, O projections
+            for proj_name, proj_module in [
+                ('q_proj', attention.q_proj),
+                ('k_proj', attention.k_proj), 
+                ('v_proj', attention.v_proj),
+                ('o_proj', attention.o_proj)
+            ]:
+                if isinstance(proj_module, LowRankLinear):
+                    # LowRank: 两个矩阵 weight_in 和 weight_out
+                    weight_in_sparsity = calculate_sparsity(proj_module.weight_in)
+                    weight_out_sparsity = calculate_sparsity(proj_module.weight_out)
+                    sparsity_stats[f'weight_sparsity/layer_{layer_idx}/attn_{proj_name}_in'] = weight_in_sparsity
+                    sparsity_stats[f'weight_sparsity/layer_{layer_idx}/attn_{proj_name}_out'] = weight_out_sparsity
+                else:
+                    # Full-rank: 一个权重矩阵
+                    weight_sparsity = calculate_sparsity(proj_module.weight)
+                    sparsity_stats[f'weight_sparsity/layer_{layer_idx}/attn_{proj_name}'] = weight_sparsity
+            
+            # MLP权重
+            mlp = layer.mlp
+            
+            # Up和Down projections (以及Gate如果存在)
+            mlp_projs = [('up_proj', mlp.up_proj), ('down_proj', mlp.down_proj)]
+            if hasattr(mlp, 'gate_proj') and mlp.gate_proj is not None:
+                mlp_projs.append(('gate_proj', mlp.gate_proj))
+            
+            for proj_name, proj_module in mlp_projs:
+                if isinstance(proj_module, LowRankLinear):
+                    # LowRank: 两个矩阵
+                    weight_in_sparsity = calculate_sparsity(proj_module.weight_in)
+                    weight_out_sparsity = calculate_sparsity(proj_module.weight_out)
+                    sparsity_stats[f'weight_sparsity/layer_{layer_idx}/mlp_{proj_name}_in'] = weight_in_sparsity
+                    sparsity_stats[f'weight_sparsity/layer_{layer_idx}/mlp_{proj_name}_out'] = weight_out_sparsity
+                else:
+                    # Full-rank: 一个权重矩阵
+                    weight_sparsity = calculate_sparsity(proj_module.weight)
+                    sparsity_stats[f'weight_sparsity/layer_{layer_idx}/mlp_{proj_name}'] = weight_sparsity
+    
+    return sparsity_stats
+
+
+def calculate_sparsity(weight_tensor):
+    """
+    计算权重张量的稀疏度
+    
+    Args:
+        weight_tensor: 权重张量
+        
+    Returns:
+        float: 稀疏度 (0到1之间)
+    """
+    if weight_tensor is None:
+        return 0.0
+    
+    total_elements = weight_tensor.numel()
+    zero_elements = (weight_tensor == 0).sum().item()
+    return zero_elements / total_elements if total_elements > 0 else 0.0
+
+
 def check_model_weights_health(model, step):
     """Check model weights for NaN/Inf issues"""
     if step % 200 != 0:
@@ -709,6 +809,14 @@ def main(args):
     # Add activation function and sparsity parameters to model config
     model_config.squ_relu = args.squ_relu
     model_config.activation_2by4 = args.activation_2by4
+    model_config.wandb_sparsityrelu = args.wandb_sparsityrelu
+    
+    # Enable sparsity logging if requested (set early to ensure it's available)
+    if args.wandb_sparsityrelu:
+        if ActivationSparse2to4Function is not None and ActivationSparse2to4LowRankFunction is not None:
+            ActivationSparse2to4Function._enable_sparsity_logging = True
+            ActivationSparse2to4LowRankFunction._enable_sparsity_logging = True
+            logger.info("📊 Activation sparsity logging enabled for wandb")
     
     if args.squ_relu != "silu":
         logger.info(f"🔧 Using {args.squ_relu} activation in MLP layers (no gate projection)")
@@ -740,6 +848,15 @@ def main(args):
         model: HF_LlamaForCausalLM = AutoModelForCausalLM.from_config(model_config)
     else:
         model = LlamaForCausalLM(model_config)
+
+    # Initialize sparsity recording if enabled
+    if args.wandb_sparsityrelu and ActivationSparse2to4Function is not None:
+        print(f"🔧 Enabling sparsity recording for wandb_sparsityrelu")
+        # Enable sparsity logging in both activation sparse functions
+        ActivationSparse2to4Function._wandb_sparsityrelu_enabled = True
+        ActivationSparse2to4LowRankFunction._wandb_sparsityrelu_enabled = True
+        # Initialize global training step counter
+        ActivationSparse2to4Function._global_training_step = 0
 
     if args.activation_checkpointing:
         model.gradient_checkpointing_enable()
@@ -776,7 +893,7 @@ def main(args):
         runname = f"{time.strftime('%m%d_%H%M%S')}_gc{args.grad_clipping}_step{args.num_training_steps}_" \
                   f"model{model_size}_ar{args.loro_attn_rank}_loty{args.loro_type}_fr{args.loro_freq}_ls_{args.loro_lr_scaler}_sc{args.scheduler}_crfr{args.cosine_restart_freq}_as{args.lr_adjust_steps}_ra{args.loro_refresh}_rf{args.loro_refresh_freq}_sc_{args.loro_scope}_ini_{args.loro_init}_op_{args.optimizer}_mlr{args.min_lr_ratio}_lr{args.lr}_bs{args.batch_size}_" \
                   f"tbs{args.total_batch_size}_se_{args.save_every}_ee_{args.eval_every}_24{args.enable_2to4_sparse}_a24{args.attn_2by4}_m24{args.mlp_2by4}_" \
-                  f"save{args.save_ckpt}_ac{args.activation_2by4}_sf{args.activation_soft_threshold}_act{args.squ_relu}"
+                  f"save{args.save_ckpt}_ac{args.activation_2by4}_sf{args.activation_soft_threshold}_act{args.squ_relu}_wsr{args.wandb_sparsityrelu}"
         print(f"runname= {runname}")
         runname_dir = os.path.join(args.save_dir, runname)
         os.makedirs(runname_dir, exist_ok=True)
@@ -1237,6 +1354,12 @@ def main(args):
 
         global_step += 1
         local_step += 1
+        
+        # Set current training step for sparsity logging
+        LlamaMLP._current_training_step = global_step
+        # Also update the global step for activation sparse functions
+        if args.wandb_sparsityrelu and ActivationSparse2to4Function is not None:
+            ActivationSparse2to4Function._global_training_step = global_step
 
         if update_step > args.num_training_steps:
             logger.info(
@@ -1429,9 +1552,9 @@ def main(args):
         
         # Update activation sparse step counter for dense warmup
         if args.activation_2by4:
-            
-            ActivationSparse2to4Function.increment_step()
-            ActivationSparse2to4LowRankFunction.increment_step()
+            if ActivationSparse2to4Function is not None and ActivationSparse2to4LowRankFunction is not None:
+                ActivationSparse2to4Function.increment_step()
+                ActivationSparse2to4LowRankFunction.increment_step()
             
             # Log warmup status
             current_step = ActivationSparse2to4Function.get_training_step()
@@ -1574,6 +1697,17 @@ def main(args):
                         "flip_rate/total": 0.0
                     })
 
+            # Add sparsity statistics if enabled
+            if args.wandb_sparsityrelu:
+                sparsity_stats = LlamaMLP.get_sparsity_stats()
+                if sparsity_stats:
+                    wandb_dict.update(sparsity_stats)
+            
+            # Add weight sparsity statistics for all network layers
+            weight_sparsity_stats = get_weight_sparsity_stats(model)
+            if weight_sparsity_stats:
+                wandb_dict.update(weight_sparsity_stats)
+            
             wandb.log(wandb_dict, step=global_step)
 
             # track training stats - 确保所有值都是Python标量，避免BFloat16类型问题
