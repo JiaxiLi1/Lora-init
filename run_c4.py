@@ -890,10 +890,10 @@ def main(args):
     )
     if global_rank == 0:
         model_size = extract_size_and_type(args.model_config)
-        runname = f"{time.strftime('%m%d_%H%M%S')}_gc{args.grad_clipping}_step{args.num_training_steps}_" \
-                  f"model{model_size}_ar{args.loro_attn_rank}_loty{args.loro_type}_fr{args.loro_freq}_ls_{args.loro_lr_scaler}_sc{args.scheduler}_crfr{args.cosine_restart_freq}_as{args.lr_adjust_steps}_ra{args.loro_refresh}_rf{args.loro_refresh_freq}_sc_{args.loro_scope}_ini_{args.loro_init}_op_{args.optimizer}_mlr{args.min_lr_ratio}_lr{args.lr}_bs{args.batch_size}_" \
-                  f"tbs{args.total_batch_size}_se_{args.save_every}_ee_{args.eval_every}_24{args.enable_2to4_sparse}_a24{args.attn_2by4}_m24{args.mlp_2by4}_" \
-                  f"save{args.save_ckpt}_ac{args.activation_2by4}_sf{args.activation_soft_threshold}_act{args.squ_relu}_wsr{args.wandb_sparsityrelu}"
+        runname = f"{time.strftime('%m%d_%H%M%S')}_gc{args.grad_clipping}w{args.weight_decay}_s{args.num_training_steps}_" \
+                  f"m{model_size}_ar{args.loro_attn_rank}_loty{args.loro_type}_fr{args.loro_freq}_ls_{args.loro_lr_scaler}_sc{args.scheduler}_crfr{args.cosine_restart_freq}_as{args.lr_adjust_steps}_ra{args.loro_refresh}_rf{args.loro_refresh_freq}_sc_{args.loro_scope}_ini_{args.loro_init}_op_{args.optimizer}_mlr{args.min_lr_ratio}_lr{args.lr}_bs{args.batch_size}_" \
+                  f"tb{args.total_batch_size}_se{args.save_every}_ee{args.eval_every}_24{args.enable_2to4_sparse}_a24{args.attn_2by4}_m24{args.mlp_2by4}_" \
+                  f"sa{args.save_ckpt}_ac{args.activation_2by4}_sf{args.activation_soft_threshold}_act{args.squ_relu}_wsr{args.wandb_sparsityrelu}_am{args.activation_sparse_method}_w{args.activation_dense_warmup_steps}_dx{args.dx_direct_sparse}"
         print(f"runname= {runname}")
         runname_dir = os.path.join(args.save_dir, runname)
         os.makedirs(runname_dir, exist_ok=True)
