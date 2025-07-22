@@ -1412,16 +1412,16 @@ def main(args):
             print(f"   Loss has Inf: {torch.isinf(loss).any()}")
             
             # Save emergency checkpoint before crash
-            if global_rank == 0:
-                emergency_path = os.path.join(args.save_dir, f"emergency_nan_loss_step_{global_step}")
-                os.makedirs(emergency_path, exist_ok=True)
-                torch.save({
-                    'model': model.state_dict() if not isinstance(model, torch.nn.parallel.DistributedDataParallel) else model.module.state_dict(),
-                    'step': global_step,
-                    'loss': loss.item()
-                }, os.path.join(emergency_path, "emergency_state.pt"))
-                print(f"💾 Emergency checkpoint saved to: {emergency_path}")
-            break
+            # if global_rank == 0:
+            #     emergency_path = os.path.join(args.save_dir, f"emergency_nan_loss_step_{global_step}")
+            #     os.makedirs(emergency_path, exist_ok=True)
+            #     torch.save({
+            #         'model': model.state_dict() if not isinstance(model, torch.nn.parallel.DistributedDataParallel) else model.module.state_dict(),
+            #         'step': global_step,
+            #         'loss': loss.item()
+            #     }, os.path.join(emergency_path, "emergency_state.pt"))
+            #     print(f"💾 Emergency checkpoint saved to: {emergency_path}")
+            # break
         
         # 🔍 Debug: Track loss trends and problems
         if global_step % 200 == 0:  # 🔧 REDUCED: Every 200 steps instead of 50
@@ -1479,18 +1479,18 @@ def main(args):
             print(f"   Zero gradient ratio: {health_status['zero_ratio']*100:.1f}%")
             print(f"   Average gradient norm: {health_status['avg_norm']:.2e}")
             
-            # Save emergency checkpoint
-            if global_rank == 0:
-                emergency_path = os.path.join(args.save_dir, f"emergency_stop_step_{global_step}")
-                os.makedirs(emergency_path, exist_ok=True)
-                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                    model.module.save_pretrained(emergency_path, max_shard_size="100GB")
-                else:
-                    model.save_pretrained(emergency_path, max_shard_size="100GB")
-                print(f"💾 Emergency checkpoint saved to {emergency_path}")
-            
-            # Exit gracefully
-            break
+            # # Save emergency checkpoint
+            # if global_rank == 0:
+            #     emergency_path = os.path.join(args.save_dir, f"emergency_stop_step_{global_step}")
+            #     os.makedirs(emergency_path, exist_ok=True)
+            #     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            #         model.module.save_pretrained(emergency_path, max_shard_size="100GB")
+            #     else:
+            #         model.save_pretrained(emergency_path, max_shard_size="100GB")
+            #     print(f"💾 Emergency checkpoint saved to {emergency_path}")
+            #
+            # # Exit gracefully
+            # break
 
         # 🔍 Debug: Gradient clipping analysis
         if args.grad_clipping != 0.0:
