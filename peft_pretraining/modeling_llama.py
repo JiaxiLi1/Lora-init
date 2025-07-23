@@ -326,17 +326,10 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
     _training_step = 0
     _warmup_steps = 1000  # Default value, can be overridden
     
-    @staticmethod
-    def _record_activation_sparsity_static(activated_tensor, layer_id=None):
-        """
-        Static method to record activation sparsity (called from forward pass) - LowRank version
-        """
-        # Delegate to the standard version
-        ActivationSparse2to4Function._record_activation_sparsity_static(activated_tensor, layer_id)
-    
+
     @staticmethod
     @custom_fwd
-    def forward(ctx, input, weight_in1, weight_out1, weight_in2, weight_out2, bias1=None, bias2=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=False):
+    def forward(ctx, input, weight_in1, weight_out1, weight_in2, weight_out2, bias1=None, bias2=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=False, dynamic_steps=10, calibration_samples=100):
         """
         低秩FFN Forward Pass
         
@@ -348,13 +341,15 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
             weight_out2: Second layer output weight (hidden_size, rank2)
             bias1: First layer bias (optional)
             bias2: Second layer bias (optional)
-            sparsity_method: "naive", "mvue", or "soft_threshold"
+            sparsity_method: "naive", "mvue", "soft_threshold_weights", or "soft_dynamic"
             warmup_steps: Number of steps for dense warmup
             dx_direct_sparse: If True, use direct naive sparse for dx computation
         """
         ctx.sparsity_method = sparsity_method
         ctx.input_shape = input.shape
         ctx.dx_direct_sparse = dx_direct_sparse
+        ctx.dynamic_steps = dynamic_steps
+        ctx.calibration_samples = calibration_samples
         
         # Update warmup steps if provided
         if warmup_steps is not None:
@@ -395,6 +390,8 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
             # Record sparsity for this layer
             ActivationSparse2to4LowRankFunction._record_activation_sparsity_static(y2)
         
+
+        
         # Dense warmup for first N iterations
         if ActivationSparse2to4LowRankFunction._training_step < ActivationSparse2to4LowRankFunction._warmup_steps:
             # During warmup, use dense computation
@@ -416,8 +413,17 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
                 y2_sparse = apply_naive_2to4_sparsity(y2)
             elif sparsity_method == "mvue":
                 y2_sparse = apply_mvue_2to4_sparsity(y2)
-            elif sparsity_method == "soft_threshold":
-                y2_sparse = apply_soft_threshold_2to4_sparsity(y2, scale=1.0)
+            elif sparsity_method == "soft_threshold_weights":
+                y2_sparse = apply_soft_threshold_weights_2to4_sparsity(y2, scale=1.0)
+            elif sparsity_method == "soft_dynamic":
+                # 获取层ID和当前步数
+                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) % 12
+                current_step = getattr(ActivationSparse2to4LowRankFunction, '_global_training_step', 0)
+                # 从config获取calibration_samples
+                calibration_samples = getattr(ctx, 'calibration_samples', 100)
+                # dynamic_steps已经作为参数传入
+                y2_sparse = apply_soft_threshold_dynamic_activation_2to4_sparsity(y2, layer_id, current_step, dynamic_steps, calibration_samples)
+                ActivationSoftThresholdManager._current_layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) + 1
             else:
                 raise ValueError(f"Unknown sparsity method: {sparsity_method}")
             
@@ -561,8 +567,8 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
             if ctx.needs_input_grad[6] and bias2 is not None:
                 grad_bias2 = dy3.sum(0)
         
-        # Return gradients for all input parameters
-        return grad_input, grad_weight_in1, grad_weight_out1, grad_weight_in2, grad_weight_out2, grad_bias1, grad_bias2, None, None, None
+        # Return gradients for all input parameters (12 total to match forward signature)
+        return grad_input, grad_weight_in1, grad_weight_out1, grad_weight_in2, grad_weight_out2, grad_bias1, grad_bias2, None, None, None, None, None
     
     @staticmethod
     def increment_step():
@@ -585,12 +591,52 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
         return ActivationSparse2to4LowRankFunction._warmup_steps
     
     @staticmethod
-    def _record_activation_sparsity_static(activated_tensor):
+    def _record_activation_sparsity_static(activated_tensor, layer_id=None):
         """
-        Static method to record activation sparsity statistics (same as standard version)
+        Static method to record activation sparsity (called from forward pass) - LowRank version
         """
-        # Reuse the same method from ActivationSparse2to4Function
-        ActivationSparse2to4Function._record_activation_sparsity_static(activated_tensor)
+        try:
+            # Get current training step from the low-rank class variable set by main training loop
+            current_step = getattr(ActivationSparse2to4LowRankFunction, '_global_training_step', 0)
+        except Exception as e:
+            current_step = 0
+        
+        # Initialize recording state for this step if needed
+        if not hasattr(ActivationSparse2to4LowRankFunction, '_last_recorded_step'):
+            ActivationSparse2to4LowRankFunction._last_recorded_step = -1
+            ActivationSparse2to4LowRankFunction._current_step_layer_count = 0
+        
+        # Reset layer counter for new step
+        if ActivationSparse2to4LowRankFunction._last_recorded_step != current_step:
+            ActivationSparse2to4LowRankFunction._last_recorded_step = current_step
+            ActivationSparse2to4LowRankFunction._current_step_layer_count = 0
+            
+            # Clear previous step's stats when starting a new step
+            if hasattr(LlamaMLP, '_sparsity_stats'):
+                LlamaMLP._sparsity_stats.clear()
+        
+        # For low-rank layers, we also need to reset layer registry when step changes
+        if hasattr(LlamaMLP, '_layer_registry') and current_step != getattr(LlamaMLP, '_last_step_processed', -1):
+            LlamaMLP._layer_registry.clear()
+            LlamaMLP._last_step_processed = current_step
+        
+        # Use the layer count for this step as layer_id (0-11 for 12 layers)
+        if layer_id is None:
+            layer_id = ActivationSparse2to4LowRankFunction._current_step_layer_count
+        
+        ActivationSparse2to4LowRankFunction._current_step_layer_count += 1
+        
+        with torch.no_grad():
+            # Calculate sparsity (percentage of zero values)
+            total_elements = activated_tensor.numel()
+            zero_elements = (activated_tensor == 0).sum().item()
+            sparsity = zero_elements / total_elements
+            
+            # Store in the global sparsity stats (will be uploaded by main loop)
+            if not hasattr(LlamaMLP, '_sparsity_stats'):
+                LlamaMLP._sparsity_stats = {}
+                
+            LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_id}'] = sparsity
 
 
 class ActivationSparse2to4Function(autograd.Function):
@@ -621,71 +667,10 @@ class ActivationSparse2to4Function(autograd.Function):
     _training_step = 0
     _warmup_steps = 1000  # Default value, can be overridden
     
-    @staticmethod
-    def _record_activation_sparsity_static(activated_tensor, layer_id=None):
-        """
-        Static method to record activation sparsity (called from forward pass)
-        """
-        print("🚀 DEBUGGING: START")
-        print(f"🚀 DEBUGGING: _record_activation_sparsity_static 被调用!")
-        try:
-            # Get current training step from the class variable set by main training loop
-            current_step = getattr(ActivationSparse2to4Function, '_global_training_step', 0)
-            print(f"🚀 DEBUGGING: current_step = {current_step}")
-        except Exception as e:
-            print(f"🚀 DEBUGGING: getattr failed: {e}")
-            current_step = 0
-        
-        # Record every step for testing (later change to every 10 steps)
-        # if current_step % 10 != 0:
-        #     return
-            
-        # Initialize recording state for this step if needed
-        if not hasattr(ActivationSparse2to4Function, '_last_recorded_step'):
-            ActivationSparse2to4Function._last_recorded_step = -1
-            ActivationSparse2to4Function._current_step_layer_count = 0
-        
-        # Reset layer counter for new step
-        if ActivationSparse2to4Function._last_recorded_step != current_step:
-            ActivationSparse2to4Function._last_recorded_step = current_step
-            ActivationSparse2to4Function._current_step_layer_count = 0
-            
-            # Clear previous step's stats when starting a new step
-            if hasattr(LlamaMLP, '_sparsity_stats'):
-                LlamaMLP._sparsity_stats.clear()
-        
-        # For standard MLP layers, we also need to reset layer registry when step changes
-        # This ensures layer numbering is consistent across activation sparse and standard MLP
-        if hasattr(LlamaMLP, '_layer_registry') and current_step != getattr(LlamaMLP, '_last_step_processed', -1):
-            LlamaMLP._layer_registry.clear()
-            LlamaMLP._last_step_processed = current_step
-        
-        # Use the layer count for this step as layer_id (0-11 for 12 layers)
-        if layer_id is None:
-            layer_id = ActivationSparse2to4Function._current_step_layer_count
-        
-        ActivationSparse2to4Function._current_step_layer_count += 1
-        
-        with torch.no_grad():
-            # Calculate sparsity (percentage of zero values)
-            total_elements = activated_tensor.numel()
-            zero_elements = (activated_tensor == 0).sum().item()
-            sparsity = zero_elements / total_elements
-            
-            # Store in the global sparsity stats (will be uploaded by main loop)
-            if not hasattr(LlamaMLP, '_sparsity_stats'):
-                LlamaMLP._sparsity_stats = {}
-                
-            LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_id}'] = sparsity
-            LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_id}_total_elements'] = total_elements
-            LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_id}_zero_elements'] = zero_elements
-            
-            # Debug info
-            print(f"🔍 ActivationSparse2to4Function: Step {current_step}, Layer {layer_id}, Sparsity: {sparsity:.4f}")
-    
+
     @staticmethod
     @custom_fwd
-    def forward(ctx, input, weight1, weight2, bias1=None, bias2=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=False):
+    def forward(ctx, input, weight1, weight2, bias1=None, bias2=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=False, dynamic_steps=10, calibration_samples=100):
         """
         完整的FFN Forward Pass
         
@@ -695,13 +680,15 @@ class ActivationSparse2to4Function(autograd.Function):
             weight2: Second linear layer weight (intermediate_size, hidden_size)
             bias1: First linear layer bias (optional)
             bias2: Second linear layer bias (optional)
-            sparsity_method: "naive", "mvue", or "soft_threshold"
+            sparsity_method: "naive", "mvue", "soft_threshold_weights", or "soft_dynamic"
             warmup_steps: Number of steps for dense warmup
             dx_direct_sparse: If True, use direct naive sparse for dx computation instead of split-GEMM
         """
         ctx.sparsity_method = sparsity_method
         ctx.input_shape = input.shape
         ctx.dx_direct_sparse = dx_direct_sparse
+        ctx.dynamic_steps = dynamic_steps
+        ctx.calibration_samples = calibration_samples
         
         # Update warmup steps if provided
         if warmup_steps is not None:
@@ -781,6 +768,8 @@ class ActivationSparse2to4Function(autograd.Function):
                 import traceback
                 traceback.print_exc()
         
+
+        
         # # 数值稳定性处理：如果y2的值太大，进行缩放
         # max_val = y2.abs().max().item()
         # if max_val > 100:  # 经验阈值
@@ -816,8 +805,17 @@ class ActivationSparse2to4Function(autograd.Function):
                 y2_sparse = apply_naive_2to4_sparsity(y2)
             elif sparsity_method == "mvue":
                 y2_sparse = apply_mvue_2to4_sparsity(y2)
-            elif sparsity_method == "soft_threshold":
-                y2_sparse = apply_soft_threshold_2to4_sparsity(y2, scale=1.0)  # Scale handled in function
+            elif sparsity_method == "soft_threshold_weights":
+                y2_sparse = apply_soft_threshold_weights_2to4_sparsity(y2, scale=1.0)
+            elif sparsity_method == "soft_dynamic":
+                # 获取层ID和当前步数
+                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id_standard', 0) % 12
+                current_step = getattr(ActivationSparse2to4Function, '_global_training_step', 0)
+                # 从config获取calibration_samples
+                calibration_samples = getattr(ctx, 'calibration_samples', 100)
+                # dynamic_steps已经作为参数传入
+                y2_sparse = apply_soft_threshold_dynamic_activation_2to4_sparsity(y2, layer_id, current_step, dynamic_steps, calibration_samples)
+                ActivationSoftThresholdManager._current_layer_id_standard = getattr(ActivationSoftThresholdManager, '_current_layer_id_standard', 0) + 1
             else:
                 raise ValueError(f"Unknown sparsity method: {sparsity_method}")
             
@@ -933,8 +931,8 @@ class ActivationSparse2to4Function(autograd.Function):
             if ctx.needs_input_grad[4] and bias2 is not None:
                 grad_bias2 = dy3.sum(0)
         
-        # Return gradients for all input parameters (including dx_direct_sparse)
-        return grad_input, grad_weight1, grad_weight2, grad_bias1, grad_bias2, None, None, None
+        # Return gradients for all input parameters (10 total to match forward signature)
+        return grad_input, grad_weight1, grad_weight2, grad_bias1, grad_bias2, None, None, None, None, None
     
     @staticmethod
     def increment_step():
@@ -957,35 +955,52 @@ class ActivationSparse2to4Function(autograd.Function):
         return ActivationSparse2to4Function._warmup_steps
     
     @staticmethod
-    def _record_activation_sparsity_static(activated_tensor):
+    def _record_activation_sparsity_static(activated_tensor, layer_id=None):
         """
         Static method to record activation sparsity statistics
         """
+        try:
+            # Get current training step from the class variable set by main training loop
+            current_step = getattr(ActivationSparse2to4Function, '_global_training_step', 0)
+        except Exception as e:
+            current_step = 0
+        
+        # Initialize recording state for this step if needed
+        if not hasattr(ActivationSparse2to4Function, '_last_recorded_step'):
+            ActivationSparse2to4Function._last_recorded_step = -1
+            ActivationSparse2to4Function._current_step_layer_count = 0
+        
+        # Reset layer counter for new step
+        if ActivationSparse2to4Function._last_recorded_step != current_step:
+            ActivationSparse2to4Function._last_recorded_step = current_step
+            ActivationSparse2to4Function._current_step_layer_count = 0
+            
+            # Clear previous step's stats when starting a new step
+            if hasattr(LlamaMLP, '_sparsity_stats'):
+                LlamaMLP._sparsity_stats.clear()
+        
+        # For standard MLP layers, we also need to reset layer registry when step changes
+        if hasattr(LlamaMLP, '_layer_registry') and current_step != getattr(LlamaMLP, '_last_step_processed', -1):
+            LlamaMLP._layer_registry.clear()
+            LlamaMLP._last_step_processed = current_step
+        
+        # Use the layer count for this step as layer_id (0-11 for 12 layers)
+        if layer_id is None:
+            layer_id = ActivationSparse2to4Function._current_step_layer_count
+        
+        ActivationSparse2to4Function._current_step_layer_count += 1
+        
         with torch.no_grad():
             # Calculate sparsity (percentage of zero values)
             total_elements = activated_tensor.numel()
             zero_elements = (activated_tensor == 0).sum().item()
             sparsity = zero_elements / total_elements
             
-            # Get layer index using a simple registry (reuse LlamaMLP registry)
-            if not hasattr(LlamaMLP, '_layer_registry'):
-                LlamaMLP._layer_registry = {}
-                LlamaMLP._current_sparsities = {}
-            
-            # For activation sparse functions, use a special key
-            layer_key = f"activation_sparse_{len(LlamaMLP._current_sparsities)}"
-            if layer_key not in LlamaMLP._current_sparsities:
-                layer_idx = len(LlamaMLP._layer_registry)
-                LlamaMLP._layer_registry[layer_key] = layer_idx
-            else:
-                layer_idx = LlamaMLP._layer_registry[layer_key]
-            
-            # Store latest sparsity for this layer
-            LlamaMLP._current_sparsities[layer_idx] = {
-                'sparsity': sparsity,
-                'total_elements': total_elements,
-                'zero_elements': zero_elements
-            }
+            # Store in the global sparsity stats (will be uploaded by main loop)
+            if not hasattr(LlamaMLP, '_sparsity_stats'):
+                LlamaMLP._sparsity_stats = {}
+                
+            LlamaMLP._sparsity_stats[f'sparsity_relu/layer_{layer_id}'] = sparsity
 
 
 def apply_naive_2to4_sparsity(input_tensor):
@@ -1051,9 +1066,9 @@ def apply_mvue_2to4_sparsity(input_tensor):
     return output
 
 
-def apply_soft_threshold_2to4_sparsity(input_tensor, scale):
+def apply_soft_threshold_weights_2to4_sparsity(input_tensor, scale):
     """
-    Apply soft threshold 2:4 sparsity using triton kernel - strict implementation without fallback
+    Apply soft threshold 2:4 sparsity using triton kernel with weight-based scaling - strict implementation without fallback
     """
     # Convert bfloat16 to float16 for Triton compatibility
     original_dtype = input_tensor.dtype
@@ -1072,6 +1087,87 @@ def apply_soft_threshold_2to4_sparsity(input_tensor, scale):
         output = output_temp * scale
     
     return output
+
+
+# Global storage for activation-based soft threshold scaling factors
+class ActivationSoftThresholdManager:
+    """
+    管理基于激活的软阈值缩放因子
+    """
+    _activation_scales = {}  # 存储固定的激活缩放因子 {layer_id: scale}
+    _dynamic_scales = {}     # 存储动态的激活缩放因子 {layer_id: scale}
+    _last_update_step = {}   # 记录每层最后更新的步数 {layer_id: step}
+    _calibration_data = {}   # 存储校准数据 {layer_id: [activations]}
+    _is_calibrated = False   # 是否已完成固定模式的校准
+    
+
+    
+    @classmethod
+    def _compute_optimal_scale(cls, activations):
+        """
+        计算最优的缩放因子，使得2:4稀疏化前后的MSE最小
+        """
+        # 应用naive 2:4稀疏化
+        sparse_activations = apply_naive_2to4_sparsity(activations)
+        
+        # 寻找最优缩放因子
+        scales = torch.linspace(0.5, 2.0, 100, device=activations.device)
+        best_scale = 1.0
+        best_mse = float('inf')
+        
+        for scale in scales:
+            scaled_sparse = sparse_activations * scale
+            mse = torch.mean((activations - scaled_sparse) ** 2).item()
+            if mse < best_mse:
+                best_mse = mse
+                best_scale = scale.item()
+        
+        return best_scale
+    
+    @classmethod
+    def get_dynamic_activation_scale(cls, layer_id, current_step, dynamic_steps=10, activations=None, calibration_samples=100):
+        """
+        获取动态激活缩放因子
+        """
+        # 动态模式：检查是否需要更新
+        if (dynamic_steps == 0 or  # 每步都更新
+            layer_id not in cls._last_update_step or 
+            current_step - cls._last_update_step[layer_id] >= dynamic_steps):
+            
+            # 从当前激活中采样固定数量的样本
+            if activations.shape[0] > calibration_samples:
+                # 随机采样
+                indices = torch.randperm(activations.shape[0])[:calibration_samples]
+                sampled_activations = activations[indices]
+            else:
+                sampled_activations = activations
+            
+            # 更新该层的缩放因子
+            scale = cls._compute_optimal_scale(sampled_activations)
+            cls._dynamic_scales[layer_id] = scale
+            cls._last_update_step[layer_id] = current_step
+            
+            if current_step % 100 == 0:  # 每100步打印一次
+                print(f"🔄 Layer {layer_id} dynamic scale updated at step {current_step}: {scale:.6f} (using {sampled_activations.shape[0]} samples)")
+        
+        return cls._dynamic_scales.get(layer_id, 1.0)
+    
+
+
+
+
+def apply_soft_threshold_dynamic_activation_2to4_sparsity(input_tensor, layer_id=0, current_step=0, dynamic_steps=10, calibration_samples=100):
+    """
+    Apply soft threshold 2:4 sparsity with dynamic activation-based scaling
+    """
+    # 获取动态缩放因子
+    scale = ActivationSoftThresholdManager.get_dynamic_activation_scale(
+        layer_id, current_step, dynamic_steps, input_tensor, calibration_samples
+    )
+    
+    # 应用naive 2:4稀疏化并缩放
+    sparse_tensor = apply_naive_2to4_sparsity(input_tensor)
+    return sparse_tensor * scale
 
 
 def compute_split_gemm_lowrank_intermediate(dy1, weight_out1, forward_mask):
@@ -1536,15 +1632,21 @@ class LlamaMLP(nn.Module):
                     sparsity_method = getattr(config, 'activation_sparse_method', 'mvue')
                     warmup_steps = getattr(config, 'activation_dense_warmup_steps', 1000)
                     dx_direct_sparse = getattr(config, 'dx_direct_sparse', False)
+                    dynamic_steps = getattr(config, 'dynamic_activation_steps', 10)
+                    calibration_samples = getattr(config, 'activation_calibration_samples', 100)
                 else:
                     # Fallback values if no config
                     sparsity_method = 'mvue'
                     warmup_steps = 1000
                     dx_direct_sparse = False
+                    dynamic_steps = 10
+                    calibration_samples = 100
                 
                 # Check if we're using LowRankLinear layers
                 
                 is_lowrank = isinstance(self.up_proj, LowRankLinear) and isinstance(self.down_proj, LowRankLinear)
+                
+
                 
                 if is_lowrank:
                     # Use low-rank version of activation 2:4 sparsity
@@ -1558,7 +1660,9 @@ class LlamaMLP(nn.Module):
                         self.down_proj.bias,        # bias2
                         sparsity_method,            # sparsity method
                         warmup_steps,               # warmup steps
-                        dx_direct_sparse            # dx computation method
+                        dx_direct_sparse,           # dx computation method
+                        dynamic_steps,              # dynamic activation steps
+                        calibration_samples         # calibration samples
                     )
                 else:
                     # Use standard version for full-rank layers
@@ -1570,7 +1674,9 @@ class LlamaMLP(nn.Module):
                         None,                 # bias2 (down_proj has no bias)
                         sparsity_method,      # sparsity method
                         warmup_steps,         # warmup steps
-                        dx_direct_sparse      # dx computation method
+                        dx_direct_sparse,     # dx computation method
+                        dynamic_steps,        # dynamic activation steps
+                        calibration_samples   # calibration samples
                     )
             else:
                 # Standard forward pass without activation 2:4 sparsity

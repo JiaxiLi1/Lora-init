@@ -124,9 +124,22 @@ def parse_args():
         "--activation_sparse_method",
         type=str,
         default="mvue",
-        choices=["naive", "mvue", "soft_threshold"],
-        help="Method for activation 2:4 sparsification when squ_relu is enabled: naive (top-2), mvue, or soft_threshold"
+        choices=["naive", "mvue", "soft_threshold_weights", "soft_dynamic"],
+        help="Method for activation 2:4 sparsification: naive (top-2), mvue, soft_threshold_weights (weight MSE), soft_dynamic (dynamic activation MSE)"
     )
+    parser.add_argument(
+        "--dynamic_activation_steps",
+        type=int,
+        default=10,
+        help="Update interval for soft_dynamic method (default: 10 steps)"
+    )
+    parser.add_argument(
+        "--activation_calibration_samples",
+        type=int,
+        default=100,
+        help="Number of samples to use for activation-based soft threshold calibration (default: 100)"
+    )
+
     parser.add_argument(
         "--activation_dense_warmup_steps",
         type=int,
@@ -830,6 +843,8 @@ def main(args):
         model_config.activation_sparse_method = args.activation_sparse_method
         model_config.activation_dense_warmup_steps = args.activation_dense_warmup_steps
         model_config.dx_direct_sparse = args.dx_direct_sparse
+        model_config.dynamic_activation_steps = args.dynamic_activation_steps
+        model_config.activation_calibration_samples = args.activation_calibration_samples
     
     if "geomlrk" in args.optimizer and args.loro_mlp_dense:
         mlp_rank = min(model_config.intermediate_size, args.loro_mlp_rank)
@@ -855,8 +870,9 @@ def main(args):
         # Enable sparsity logging in both activation sparse functions
         ActivationSparse2to4Function._wandb_sparsityrelu_enabled = True
         ActivationSparse2to4LowRankFunction._wandb_sparsityrelu_enabled = True
-        # Initialize global training step counter
+        # Initialize global training step counter for both versions
         ActivationSparse2to4Function._global_training_step = 0
+        ActivationSparse2to4LowRankFunction._global_training_step = 0
 
     if args.activation_checkpointing:
         model.gradient_checkpointing_enable()
@@ -873,6 +889,8 @@ def main(args):
         model = model.to(device=device)
 
     n_total_params = sum(p.numel() for p in model.parameters())
+    
+
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     # Initialize wandb
     run_config = dict(vars(args))
@@ -893,7 +911,7 @@ def main(args):
         runname = f"{time.strftime('%m%d_%H%M%S')}gc{args.grad_clipping}w{args.weight_decay}s{args.num_training_steps}" \
                   f"m{model_size}_ar{args.loro_attn_rank}loty{args.loro_type}fr{args.loro_freq}ls{args.loro_lr_scaler}sc{args.scheduler}crfr{args.cosine_restart_freq}as{args.lr_adjust_steps}ra{args.loro_refresh}rf{args.loro_refresh_freq}sc{args.loro_scope}_ini{args.loro_init}_op{args.optimizer}mlr{args.min_lr_ratio}lr{args.lr}bs{args.batch_size}" \
                   f"tb{args.total_batch_size}_se{args.save_every}_ee{args.eval_every}_24{args.enable_2to4_sparse}a{args.attn_2by4}m{args.mlp_2by4}_" \
-                  f"sa{args.save_ckpt}_ac{args.activation_2by4}_sf{args.activation_soft_threshold}_ac{args.squ_relu}_wb{args.wandb_sparsityrelu}_am{args.activation_sparse_method}_w{args.activation_dense_warmup_steps}_dx{args.dx_direct_sparse}"
+                  f"sa{args.save_ckpt}_ac{args.activation_2by4}_sf{args.activation_soft_threshold}_ac{args.squ_relu}_wb{args.wandb_sparsityrelu}_am{args.activation_sparse_method}_s{args.dynamic_activation_steps}_s{args.activation_calibration_samples}_w{args.activation_dense_warmup_steps}_dx{args.dx_direct_sparse}"
         print(f"runname= {runname}")
         runname_dir = os.path.join(args.save_dir, runname)
         os.makedirs(runname_dir, exist_ok=True)
@@ -1360,6 +1378,9 @@ def main(args):
         # Also update the global step for activation sparse functions
         if args.wandb_sparsityrelu and ActivationSparse2to4Function is not None:
             ActivationSparse2to4Function._global_training_step = global_step
+            # Also set for low-rank version
+            if ActivationSparse2to4LowRankFunction is not None:
+                ActivationSparse2to4LowRankFunction._global_training_step = global_step
 
         if update_step > args.num_training_steps:
             logger.info(
