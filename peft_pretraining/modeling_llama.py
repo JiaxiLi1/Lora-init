@@ -329,7 +329,7 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
 
     @staticmethod
     @custom_fwd
-    def forward(ctx, input, weight_in1, weight_out1, weight_in2, weight_out2, bias1=None, bias2=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=False, dynamic_steps=10, calibration_samples=100):
+    def forward(ctx, input, weight_in1, weight_out1, weight_in2, weight_out2, bias1=None, bias2=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=False, dynamic_steps=10, calibration_samples=100, enable_permute=True):
         """
         低秩FFN Forward Pass
         
@@ -357,21 +357,27 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
         
         batch_size, seq_len, hidden_size = input.shape
         
-        # Step 1: 输入置换 (Input Permutation)
-        perm_key = f"{seq_len}_{input.device}"
-        
-        if perm_key not in ActivationSparse2to4LowRankFunction._token_permutation:
-            # Create fixed permutation for this sequence length
-            perm = torch.randperm(seq_len, device=input.device)
-            inv_perm = torch.argsort(perm)
-            ActivationSparse2to4LowRankFunction._token_permutation[perm_key] = perm
-            ActivationSparse2to4LowRankFunction._inverse_permutation[perm_key] = inv_perm
-        
-        perm = ActivationSparse2to4LowRankFunction._token_permutation[perm_key]
-        inv_perm = ActivationSparse2to4LowRankFunction._inverse_permutation[perm_key]
-        
-        # Apply permutation: [batch_size, seq_len, hidden_size]
-        input_permuted = input[:, perm, :]
+        # Step 1: 输入置换 (Input Permutation) - 可选
+        if enable_permute:
+            perm_key = f"{seq_len}_{input.device}"
+            
+            if perm_key not in ActivationSparse2to4LowRankFunction._token_permutation:
+                # Create fixed permutation for this sequence length
+                perm = torch.randperm(seq_len, device=input.device)
+                inv_perm = torch.argsort(perm)
+                ActivationSparse2to4LowRankFunction._token_permutation[perm_key] = perm
+                ActivationSparse2to4LowRankFunction._inverse_permutation[perm_key] = inv_perm
+            
+            perm = ActivationSparse2to4LowRankFunction._token_permutation[perm_key]
+            inv_perm = ActivationSparse2to4LowRankFunction._inverse_permutation[perm_key]
+            
+            # Apply permutation: [batch_size, seq_len, hidden_size]
+            input_permuted = input[:, perm, :]
+        else:
+            # Skip permutation - use input directly
+            input_permuted = input
+            perm = None
+            inv_perm = None
         
         # Step 2: 第一个低秩全连接层 (First Low-rank Linear Layer)
         # y1 = x @ weight_in1 @ weight_out1.T
@@ -439,9 +445,12 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
             ctx.inv_perm = inv_perm
             ctx.is_warmup = False
         
-        # Step 5: 逆向置换 (Inverse Permutation)
+        # Step 5: 逆向置换 (Inverse Permutation) - 可选
         y3_reshaped = y3.view(batch_size, seq_len, hidden_size)
-        output = y3_reshaped[:, inv_perm, :]
+        if enable_permute and inv_perm is not None:
+            output = y3_reshaped[:, inv_perm, :]
+        else:
+            output = y3_reshaped
         
         return output
     
@@ -460,7 +469,10 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
         batch_size, seq_len, hidden_size = grad_output.shape
         
         # Step 1: 梯度置换 (Gradient Permutation)
-        grad_output_permuted = grad_output[:, perm, :]
+        if perm is not None:
+            grad_output_permuted = grad_output[:, perm, :]
+        else:
+            grad_output_permuted = grad_output
         dy3 = grad_output_permuted.view(-1, grad_output_permuted.shape[-1])  # [batch*seq, hidden_size]
         
         # Step 2: 计算第二个低秩层的梯度
@@ -487,7 +499,10 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
                 d_intermediate_1 = torch.mm(dy1, weight_out1)  # [batch*seq, rank1]
                 grad_input_2d = torch.mm(d_intermediate_1, weight_in1.T)  # [batch*seq, hidden_size]
                 grad_input_permuted = grad_input_2d.view(batch_size, seq_len, hidden_size)
-                grad_input = grad_input_permuted[:, inv_perm, :]
+                if inv_perm is not None:
+                    grad_input = grad_input_permuted[:, inv_perm, :]
+                else:
+                    grad_input = grad_input_permuted
             
             # 第一个低秩层的梯度
             if ctx.needs_input_grad[1]:  # weight_in1
@@ -526,7 +541,10 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
                     grad_input_2d = torch.mm(d_intermediate_1, weight_in1.T)
                 
                 grad_input_permuted = grad_input_2d.view(batch_size, seq_len, hidden_size)
-                grad_input = grad_input_permuted[:, inv_perm, :]
+                if inv_perm is not None:
+                    grad_input = grad_input_permuted[:, inv_perm, :]
+                else:
+                    grad_input = grad_input_permuted
             
             # 第一个低秋层的梯度 (使用Split-GEMM策略)
             if ctx.needs_input_grad[1] or ctx.needs_input_grad[2]:
@@ -567,8 +585,8 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
             if ctx.needs_input_grad[6] and bias2 is not None:
                 grad_bias2 = dy3.sum(0)
         
-        # Return gradients for all input parameters (12 total to match forward signature)
-        return grad_input, grad_weight_in1, grad_weight_out1, grad_weight_in2, grad_weight_out2, grad_bias1, grad_bias2, None, None, None, None, None
+        # Return gradients for all input parameters (13 total to match forward signature)
+        return grad_input, grad_weight_in1, grad_weight_out1, grad_weight_in2, grad_weight_out2, grad_bias1, grad_bias2, None, None, None, None, None, None
     
     @staticmethod
     def increment_step():
@@ -670,7 +688,7 @@ class ActivationSparse2to4Function(autograd.Function):
 
     @staticmethod
     @custom_fwd
-    def forward(ctx, input, weight1, weight2, bias1=None, bias2=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=False, dynamic_steps=10, calibration_samples=100):
+    def forward(ctx, input, weight1, weight2, bias1=None, bias2=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=False, dynamic_steps=10, calibration_samples=100, enable_permute=True):
         """
         完整的FFN Forward Pass
         
@@ -696,21 +714,27 @@ class ActivationSparse2to4Function(autograd.Function):
         
         batch_size, seq_len, hidden_size = input.shape
         
-        # Step 1: 输入置换 (Input Permutation) - Optimization 2
-        perm_key = f"{seq_len}_{input.device}"
-        
-        if perm_key not in ActivationSparse2to4Function._token_permutation:
-            # Create fixed permutation for this sequence length
-            perm = torch.randperm(seq_len, device=input.device)
-            inv_perm = torch.argsort(perm)
-            ActivationSparse2to4Function._token_permutation[perm_key] = perm
-            ActivationSparse2to4Function._inverse_permutation[perm_key] = inv_perm
-        
-        perm = ActivationSparse2to4Function._token_permutation[perm_key]
-        inv_perm = ActivationSparse2to4Function._inverse_permutation[perm_key]
-        
-        # Apply permutation: [batch_size, seq_len, hidden_size]
-        input_permuted = input[:, perm, :]
+        # Step 1: 输入置换 (Input Permutation) - 可选
+        if enable_permute:
+            perm_key = f"{seq_len}_{input.device}"
+            
+            if perm_key not in ActivationSparse2to4Function._token_permutation:
+                # Create fixed permutation for this sequence length
+                perm = torch.randperm(seq_len, device=input.device)
+                inv_perm = torch.argsort(perm)
+                ActivationSparse2to4Function._token_permutation[perm_key] = perm
+                ActivationSparse2to4Function._inverse_permutation[perm_key] = inv_perm
+            
+            perm = ActivationSparse2to4Function._token_permutation[perm_key]
+            inv_perm = ActivationSparse2to4Function._inverse_permutation[perm_key]
+            
+            # Apply permutation: [batch_size, seq_len, hidden_size]
+            input_permuted = input[:, perm, :]
+        else:
+            # Skip permutation - use input directly
+            input_permuted = input
+            perm = None
+            inv_perm = None
         
         # Step 2: 第一个全连接层 (First Linear Layer) - Dense GEMM
         # y1 = x @ w1
@@ -834,9 +858,12 @@ class ActivationSparse2to4Function(autograd.Function):
             ctx.is_warmup = False
             # ctx.scale_factor = scale_factor
         
-        # Step 5: 逆向置换 (Inverse Permutation)
+        # Step 5: 逆向置换 (Inverse Permutation) - 可选
         y3_reshaped = y3.view(batch_size, seq_len, hidden_size)
-        output = y3_reshaped[:, inv_perm, :]
+        if enable_permute and inv_perm is not None:
+            output = y3_reshaped[:, inv_perm, :]
+        else:
+            output = y3_reshaped
         
         return output
     
@@ -855,7 +882,10 @@ class ActivationSparse2to4Function(autograd.Function):
         batch_size, seq_len, hidden_size = grad_output.shape
         
         # Step 1: 梯度置换 (Gradient Permutation)
-        grad_output_permuted = grad_output[:, perm, :]
+        if perm is not None:
+            grad_output_permuted = grad_output[:, perm, :]
+        else:
+            grad_output_permuted = grad_output
         dy3 = grad_output_permuted.view(-1, grad_output_permuted.shape[-1])  # [batch*seq, hidden_size]
         
         # Step 2: 计算 dy2
@@ -877,7 +907,10 @@ class ActivationSparse2to4Function(autograd.Function):
             if ctx.needs_input_grad[0]:
                 grad_input_2d = torch.mm(dy1, weight1)
                 grad_input_permuted = grad_input_2d.view(batch_size, seq_len, hidden_size)
-                grad_input = grad_input_permuted[:, inv_perm, :]
+                if inv_perm is not None:
+                    grad_input = grad_input_permuted[:, inv_perm, :]
+                else:
+                    grad_input = grad_input_permuted
             
             if ctx.needs_input_grad[1]:
                 grad_weight1 = torch.mm(dy1.t(), input_permuted.view(-1, input_permuted.shape[-1]))
@@ -911,7 +944,10 @@ class ActivationSparse2to4Function(autograd.Function):
                         # Split-GEMM strategy: 95% sparse + 5% dense
                         grad_input_2d = compute_split_gemm_dx(dy1, weight1, forward_mask)
                     grad_input_permuted = grad_input_2d.view(batch_size, seq_len, hidden_size)
-                    grad_input = grad_input_permuted[:, inv_perm, :]
+                    if inv_perm is not None:
+                        grad_input = grad_input_permuted[:, inv_perm, :]
+                    else:
+                        grad_input = grad_input_permuted
                 
                 if ctx.needs_input_grad[1]:
                     # Split-GEMM strategy for weight gradient
@@ -931,8 +967,8 @@ class ActivationSparse2to4Function(autograd.Function):
             if ctx.needs_input_grad[4] and bias2 is not None:
                 grad_bias2 = dy3.sum(0)
         
-        # Return gradients for all input parameters (10 total to match forward signature)
-        return grad_input, grad_weight1, grad_weight2, grad_bias1, grad_bias2, None, None, None, None, None
+        # Return gradients for all input parameters (11 total to match forward signature)
+        return grad_input, grad_weight1, grad_weight2, grad_bias1, grad_bias2, None, None, None, None, None, None
     
     @staticmethod
     def increment_step():
@@ -1628,19 +1664,12 @@ class LlamaMLP(nn.Module):
             if use_activation_2by4 and self.architecture_type == 'relu2':
                 # Use activation 2:4 sparsity with squared ReLU
                 # Complete FFN flow: input -> up_proj -> squared_relu -> [2:4 sparsify] -> down_proj
-                if config is not None:
-                    sparsity_method = getattr(config, 'activation_sparse_method', 'mvue')
-                    warmup_steps = getattr(config, 'activation_dense_warmup_steps', 1000)
-                    dx_direct_sparse = getattr(config, 'dx_direct_sparse', False)
-                    dynamic_steps = getattr(config, 'dynamic_activation_steps', 10)
-                    calibration_samples = getattr(config, 'activation_calibration_samples', 100)
-                else:
-                    # Fallback values if no config
-                    sparsity_method = 'mvue'
-                    warmup_steps = 1000
-                    dx_direct_sparse = False
-                    dynamic_steps = 10
-                    calibration_samples = 100
+                sparsity_method = getattr(config, 'activation_sparse_method', 'mvue')
+                warmup_steps = getattr(config, 'activation_dense_warmup_steps', 1000)
+                dx_direct_sparse = getattr(config, 'dx_direct_sparse', False)
+                dynamic_steps = getattr(config, 'dynamic_activation_steps', 10)
+                calibration_samples = getattr(config, 'activation_calibration_samples', 100)
+                enable_permute = getattr(config, 'permute_2by4', True)
                 
                 # Check if we're using LowRankLinear layers
                 
@@ -1662,7 +1691,8 @@ class LlamaMLP(nn.Module):
                         warmup_steps,               # warmup steps
                         dx_direct_sparse,           # dx computation method
                         dynamic_steps,              # dynamic activation steps
-                        calibration_samples         # calibration samples
+                        calibration_samples,        # calibration samples
+                        enable_permute              # enable permutation
                     )
                 else:
                     # Use standard version for full-rank layers
@@ -1676,7 +1706,8 @@ class LlamaMLP(nn.Module):
                         warmup_steps,         # warmup steps
                         dx_direct_sparse,     # dx computation method
                         dynamic_steps,        # dynamic activation steps
-                        calibration_samples   # calibration samples
+                        calibration_samples,  # calibration samples
+                        enable_permute        # enable permutation
                     )
             else:
                 # Standard forward pass without activation 2:4 sparsity

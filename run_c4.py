@@ -128,6 +128,12 @@ def parse_args():
         help="Method for activation 2:4 sparsification: naive (top-2), mvue, soft_threshold_weights (weight MSE), soft_dynamic (dynamic activation MSE)"
     )
     parser.add_argument(
+        "--2by4_permute",
+        type=str_to_bool,
+        default=True,
+        help="Enable input permutation during activation 2:4 sparsity training. Set to False to disable permutation for better warmup consistency."
+    )
+    parser.add_argument(
         "--dynamic_activation_steps",
         type=int,
         default=10,
@@ -845,6 +851,7 @@ def main(args):
         model_config.dx_direct_sparse = args.dx_direct_sparse
         model_config.dynamic_activation_steps = args.dynamic_activation_steps
         model_config.activation_calibration_samples = args.activation_calibration_samples
+        model_config.permute_2by4 = getattr(args, '2by4_permute', True)  # 使用getattr避免属性名中的特殊字符问题
     
     if "geomlrk" in args.optimizer and args.loro_mlp_dense:
         mlp_rank = min(model_config.intermediate_size, args.loro_mlp_rank)
