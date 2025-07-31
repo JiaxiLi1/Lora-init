@@ -905,7 +905,7 @@ def main(args):
         {
             "max_lr": run_config.pop(
                 "lr"
-            ),  # rename lr to max_lr to avoid conflicts with scheduler
+            ),  # rename lr to max_lr to avoid conflicts with scheduler _ar{args.loro_attn_rank}loty{args.loro_type}fr{args.loro_freq}ls{args.loro_lr_scaler}sc{args.scheduler}crfr{args.cosine_restart_freq}as{args.lr_adjust_steps}ra{args.loro_refresh}rf{args.loro_refresh_freq}sc{args.loro_scope}_ini{args.loro_init}
             "total_params_M": n_total_params / 1_000_000,
             "dataset": "c4",
             "model": model_config.to_dict(),
@@ -916,7 +916,7 @@ def main(args):
     if global_rank == 0:
         model_size = extract_size_and_type(args.model_config)
         runname = f"{time.strftime('%m%d_%H%M%S')}gc{args.grad_clipping}w{args.weight_decay}s{args.num_training_steps}" \
-                  f"m{model_size}_ar{args.loro_attn_rank}loty{args.loro_type}fr{args.loro_freq}ls{args.loro_lr_scaler}sc{args.scheduler}crfr{args.cosine_restart_freq}as{args.lr_adjust_steps}ra{args.loro_refresh}rf{args.loro_refresh_freq}sc{args.loro_scope}_ini{args.loro_init}_op{args.optimizer}mlr{args.min_lr_ratio}lr{args.lr}bs{args.batch_size}" \
+                  f"m{model_size}_op{args.optimizer}mlr{args.min_lr_ratio}lr{args.lr}bs{args.batch_size}" \
                   f"tb{args.total_batch_size}_se{args.save_every}_ee{args.eval_every}_24{args.enable_2to4_sparse}a{args.attn_2by4}m{args.mlp_2by4}_" \
                   f"sa{args.save_ckpt}_ac{args.activation_2by4}_sf{args.activation_soft_threshold}_ac{args.squ_relu}_wb{args.wandb_sparsityrelu}_am{args.activation_sparse_method}_s{args.dynamic_activation_steps}_s{args.activation_calibration_samples}_w{args.activation_dense_warmup_steps}_dx{args.dx_direct_sparse}"
         print(f"runname= {runname}")
