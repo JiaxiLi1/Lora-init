@@ -622,7 +622,7 @@ def parse_args():
                         help="Reset Adam optimizer momentum every N steps. 0 means no reset. Works for all optimizer types.")
 
     # More activation ReLU2 for CoLA/LoST
-    parser.add_argument("--more_activation_relu2", action="store_true",
+    parser.add_argument("--more_activation_relu2", type=str_to_bool, default=False,
                         help="Use ReLU2 activation with activation sparsity (2:4) for CoLA/LoST low-rank matrices instead of default activations")
 
     # LORO parameters
