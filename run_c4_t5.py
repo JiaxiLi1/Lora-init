@@ -19,6 +19,7 @@ import torch.distributed as dist
 import transformers
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from transformers import LlamaForCausalLM as HF_LlamaForCausalLM
+from transformers.models.t5.configuration_t5 import T5Config
 
 import datasets
 import datasets.distributed
@@ -29,6 +30,9 @@ from loguru import logger
 from peft_pretraining import training_utils, args_utils
 from peft_pretraining.dataloader import PreprocessedIterableDataset
 from peft_pretraining.modeling_llama import LlamaForCausalLM, LlamaMLP
+
+from peft_pretraining.modeling_t5 import T5ForConditionalGeneration
+from t5_data_utils import create_t5_denoising_batch
 
 import bitsandbytes as bnb
 from galore_torch import GaLoreAdamW, GaLoreAdamW8bit, GaLoreAdafactor
@@ -52,369 +56,6 @@ from sparse_fullrank_linear import (
 )
 
 transformers.logging.set_verbosity_error()
-
-# ============================================================================
-# CoLA and LoST Integration - HybridSparseLinear class
-# ============================================================================
-
-from transformers.activations import ACT2FN
-import torch.nn.functional as F
-
-# 已弃用：CoLALoSTActivationSparse2to4Function
-# 统一改为 peft_pretraining/modeling_llama.py 中的
-# ActivationSparse2to4LowRankFunctionSingle（别名 _cola/_lost）实现。
-# 这里删除旧实现以避免重复与行为不一致。
-
-
-def reset_optimizer_momentum(optimizer):
-    """
-    Reset momentum buffers for Adam-based optimizers
-    Works for AdamW, Adam, and other Adam variants
-    对所有优化器类型都有效
-    """
-    if not hasattr(optimizer, 'state'):
-        return 0
-    
-    reset_count = 0
-    for group in optimizer.param_groups:
-        for p in group['params']:
-            if p in optimizer.state:
-                state = optimizer.state[p]
-                # Reset exp_avg (momentum) and exp_avg_sq (RMSprop-like term) 
-                if 'exp_avg' in state:
-                    state['exp_avg'].zero_()
-                    reset_count += 1
-                if 'exp_avg_sq' in state:
-                    state['exp_avg_sq'].zero_()
-                # Reset step counter for Adam (must be tensor in newer PyTorch versions)
-                if 'step' in state:
-                    if isinstance(state['step'], torch.Tensor):
-                        state['step'].zero_()  # For tensor version
-                    else:
-                        state['step'] = 0      # For integer version
-    
-    return reset_count
-
-class HybridSparseLinear(nn.Module):
-    """
-    Hybrid sparse linear layer that combines low-rank and column-wise sparse components
-    Supports both CoLA (with SiLU activation) and LoST (column-wise sparsity) modes
-    """
-    def __init__(
-            self,
-            in_features: int,
-            out_features: int,
-            original_weight: torch.Tensor,
-            lowrank_module,
-            sparsity: float = 0.05,
-            sparse_method: str = "random",
-            sparse_svd_rank: int = None,
-            sparse_svd_inverse: bool = False,
-            rank: int = 128,
-            gamma: float = 0.5,
-            bias: bool = True,
-            cola_silu: bool = False,
-            cola_init: bool = False,
-            more_activation_relu2: bool = False,
-            activation_sparse_method: str = "mvue",
-            activation_dense_warmup_steps: int = 1000,
-            activation_2by4_permute: bool = True
-    ):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.lowrank_module = lowrank_module
-        self.cola_silu = cola_silu
-        self.cola_init = cola_init
-        
-        # More activation ReLU2 configuration
-        self.more_activation_relu2 = more_activation_relu2
-        self.activation_sparse_method = activation_sparse_method
-        self.activation_dense_warmup_steps = activation_dense_warmup_steps
-        self.activation_2by4_permute = activation_2by4_permute
-        
-        # 临时使用original_weight，初始化后会删除
-        self.register_buffer('original_weight', original_weight.clone())
-        
-        # 存储形状和参数
-        self.shape = (out_features, in_features)
-        self.sparsity = sparsity
-        self.sparse_method = sparse_method
-        self.sparse_svd_rank = sparse_svd_rank
-        self.sparse_svd_inverse = sparse_svd_inverse
-        self.rank = rank
-        
-        # Gamma blending coefficient
-        self.register_buffer('gamma', torch.tensor(gamma))
-        
-        if self.cola_silu:
-            self.lr_act = ACT2FN["silu"]
-        
-        # Bias parameter
-        if bias:
-            self.bias = nn.Parameter(torch.zeros(out_features, device=original_weight.device))
-        else:
-            self.register_parameter('bias', None)
-        
-        self.mask_initialized = False
-
-    def initialize_mask(self, gradient=None):
-        """Initialize column-wise sparse mask and CoLA initialization if enabled"""
-        with torch.no_grad():
-            if self.cola_init:
-                # Initialize low-rank matrices using CoLA style initialization
-                target_sdv = (self.in_features + self.out_features) ** (-1 / 2)
-                rank = self.lowrank_module.rank
-                scale_factor = rank ** (-1 / 4) * target_sdv ** (1 / 2)
-                self.lowrank_module.weight_in.data.copy_(torch.randn_like(self.lowrank_module.weight_in) * scale_factor)
-                self.lowrank_module.weight_out.data.copy_(torch.randn_like(self.lowrank_module.weight_out) * scale_factor)
-            
-            # Column-wise sparsity for LoST
-            num_cols_to_keep = max(1, int(self.sparsity * self.in_features))
-            
-            if self.sparse_method == "svd":
-                weight_float = self.original_weight.to(torch.float32)
-                U, S, Vh = torch.linalg.svd(weight_float.t(), full_matrices=False)
-                
-                lowrank_k = int(self.lowrank_module.rank)
-                
-                if self.sparse_svd_rank and self.sparse_svd_rank > 0:
-                    k = min(self.sparse_svd_rank, len(S) - lowrank_k)
-                    
-                    if self.sparse_svd_inverse:
-                        # Use inverse order (smallest singular values first)
-                        # Start from the end and go backwards
-                        start_idx = max(0, len(S) - k)
-                        end_idx = len(S)
-                    else:
-                        # Use normal order (largest singular values after lowrank)
-                        start_idx = lowrank_k
-                        end_idx = start_idx + k
-                    
-                    U_k = U[:, start_idx:end_idx]
-                    S_k = S[start_idx:end_idx]
-                    Vh_k = Vh[start_idx:end_idx, :]
-                    
-                    reconstructed = U_k @ torch.diag(S_k) @ Vh_k
-                    # 使用 L2 范数筛选列
-                    col_norms = torch.norm(reconstructed.t(), dim=0)  # [in]
-                    _, topk_cols = torch.topk(col_norms, num_cols_to_keep, largest=True)
-                else:
-                    # 直接使用原权重的列范数
-                    col_norms = torch.norm(self.original_weight, dim=0)  # [in]
-                    _, topk_cols = torch.topk(col_norms, num_cols_to_keep, largest=True)
-            elif self.sparse_method == "random":
-                topk_cols = torch.randperm(self.in_features)[:num_cols_to_keep]
-            else:  # gradient or other methods
-                # For simplicity, fall back to random
-                topk_cols = torch.randperm(self.in_features)[:num_cols_to_keep]
-            
-            # 排序方便 forward 使用
-            topk_cols, _ = torch.sort(topk_cols)
-            
-            # 保存被选中的列 index
-            self.register_buffer("selected_col_indices", topk_cols)
-            
-            # 创建稀疏参数，只有这些列是参数
-            sparse_weight = self.original_weight[:, topk_cols]  # [out, kept_in]
-            # 确保稀疏权重使用与低秩模块相同的dtype和device
-            target_dtype = self.lowrank_module.weight_in.dtype
-            target_device = self.lowrank_module.weight_in.device
-            self.values = nn.Parameter(sparse_weight.clone().to(dtype=target_dtype, device=target_device))
-            
-            # 删除原始大矩阵
-            self.register_buffer('original_weight', None)
-            self.mask_initialized = True
-            torch.cuda.empty_cache()
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # 计算低秩部分 - 使用正确的属性名 weight_in, weight_out
-        if self.cola_silu:
-            if self.more_activation_relu2:
-                # CoLA mode with ReLU² + activation 2:4 sparsity using unified single-layer function
-                from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunction_cola
-                base_output = ActivationSparse2to4LowRankFunction_cola.apply(
-                    input, self.lowrank_module.weight_in, self.lowrank_module.weight_out,
-                    getattr(self.lowrank_module, 'bias', None),
-                    getattr(self, 'activation_sparse_method', 'naive'),
-                    getattr(self, 'activation_dense_warmup_steps', 1000),
-                    getattr(self, 'dx_direct_sparse', False),
-                    getattr(self, 'dynamic_activation_steps', 10),
-                    getattr(self, 'activation_calibration_samples', 100),
-                    getattr(self, 'activation_2by4_permute', True),
-                )
-            else:
-                # Default CoLA mode: x @ weight_in -> SiLU -> @ weight_out.T
-                temp = input @ self.lowrank_module.weight_in    # [batch, seq, rank]
-                temp = self.lr_act(temp)                       # SiLU activation  
-                base_output = temp @ self.lowrank_module.weight_out.T  # [batch, seq, out_dim]
-            
-            # For CoLA, we primarily use the low-rank part with SiLU activation
-            # Optionally blend with sparse part if sparse is enabled
-            if hasattr(self, 'values') and self.values is not None:
-                # Blend with sparse part
-                input_selected = input[..., self.selected_col_indices] 
-                sparse_output = input_selected @ self.values.T
-                output = self.gamma * base_output + (1 - self.gamma) * sparse_output
-            else:
-                # Pure CoLA: only low-rank with SiLU
-                output = base_output
-        else:
-            # Standard low-rank computation for LoST: x @ weight_in @ weight_out.T
-            if self.more_activation_relu2:
-                # LoST mode with ReLU² + activation 2:4 sparsity using low-rank split-GEMM aware function
-                from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunction_lost
-                base_output = ActivationSparse2to4LowRankFunction_lost.apply(
-                    input, self.lowrank_module.weight_in, self.lowrank_module.weight_out,
-                    getattr(self.lowrank_module, 'bias', None),
-                    getattr(self, 'activation_sparse_method', 'mvue'),
-                    getattr(self, 'activation_dense_warmup_steps', 1000),
-                    getattr(self, 'dx_direct_sparse', False),
-                    getattr(self, 'dynamic_activation_steps', 10),
-                    getattr(self, 'activation_calibration_samples', 100),
-                    getattr(self, 'activation_2by4_permute', True),
-                )
-            else:
-                # Default LoST: simple matmul
-                base_output = input @ self.lowrank_module.weight_in @ self.lowrank_module.weight_out.T
-            
-            # Compute sparse part (column-wise sparse) 
-            if hasattr(self, 'values') and self.values is not None:
-                input_selected = input[..., self.selected_col_indices]
-                sparse_output = input_selected @ self.values.T  # [batch, seq, out_dim]
-            else:
-                # Fallback to zero sparse output if mask not initialized
-                sparse_output = torch.zeros_like(base_output)
-            
-            # 组合低秩和稀疏部分
-            output = self.gamma * base_output + (1 - self.gamma) * sparse_output
-        
-        if self.bias is not None:
-            output = output + self.bias
-            
-        return output
-
-class CoLALowRankLinear(nn.Module):
-    """
-    CoLA implementation - adds SiLU activation between low-rank matrices weight_in and weight_out
-    Correct implementation: input @ weight_in -> SiLU -> @ weight_out.T
-    
-    With more_activation_relu2=True: input @ weight_in -> ReLU² + 2:4 sparse -> @ weight_out.T
-    """
-    def __init__(self, original_module, more_activation_relu2=False, activation_sparse_method="mvue", 
-                 activation_dense_warmup_steps=1000, activation_2by4_permute=True,
-                 dx_direct_sparse: int = 1,
-                 dynamic_activation_steps: int = 10,
-                 activation_calibration_samples: int = 100,
-                 cola_init: bool = False):
-        super().__init__()
-        # Copy all attributes from original LowRankLinear module
-        self.in_dim = original_module.in_dim
-        self.out_dim = original_module.out_dim
-        self.init = original_module.init
-        self.weight_in = original_module.weight_in  # [in_dim, rank]
-        self.weight_out = original_module.weight_out  # [out_dim, rank] 
-        self.bias = original_module.bias
-        
-        # CoLA activation configuration
-        self.more_activation_relu2 = more_activation_relu2
-        if more_activation_relu2:
-            # Use ReLU2 + activation 2:4 sparsity
-            self.activation_sparse_method = activation_sparse_method
-            self.activation_dense_warmup_steps = activation_dense_warmup_steps
-            self.activation_2by4_permute = activation_2by4_permute
-            self.dx_direct_sparse = dx_direct_sparse
-            self.dynamic_activation_steps = dynamic_activation_steps
-            self.activation_calibration_samples = activation_calibration_samples
-        else:
-            # Default CoLA: use SiLU
-            self.lr_act = ACT2FN["silu"]
-
-        # 可选：CoLA 初始化（对低秩矩阵 A、B 做 CoLA-style 初始化）
-        if cola_init:
-            with torch.no_grad():
-                target_sdv = (self.in_dim + self.out_dim) ** (-0.5)
-                rank = min(self.weight_in.shape[1], self.weight_out.shape[1])
-                scale_factor = (rank ** (-0.25)) * (target_sdv ** 0.5)
-                dtype_in = self.weight_in.dtype
-                dtype_out = self.weight_out.dtype
-                device = self.weight_in.device
-                self.weight_in.data.copy_(torch.randn_like(self.weight_in.to(torch.float32)).mul_(scale_factor).to(dtype_in).to(device))
-                self.weight_out.data.copy_(torch.randn_like(self.weight_out.to(torch.float32)).mul_(scale_factor).to(dtype_out).to(device))
-        
-    @property 
-    def rank(self):
-        return min(min(self.weight_in.shape), min(self.weight_out.shape))
-    
-    def forward(self, x):
-        if self.more_activation_relu2:
-            # CoLA with ReLU² + activation 2:4 sparsity using low-rank split-GEMM aware function
-            from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunction_cola
-            return ActivationSparse2to4LowRankFunction_cola.apply(
-                x, self.weight_in, self.weight_out, self.bias,
-                self.activation_sparse_method,
-                self.activation_dense_warmup_steps,
-                getattr(self, 'dx_direct_sparse', False),
-                getattr(self, 'dynamic_activation_steps', 10),
-                getattr(self, 'activation_calibration_samples', 100),
-                self.activation_2by4_permute,
-            )
-        else:
-            # Default CoLA: x @ weight_in -> SiLU -> @ weight_out.T  
-            temp = x @ self.weight_in          # [batch, seq, rank]
-            temp = self.lr_act(temp)           # SiLU activation
-            out = temp @ self.weight_out.T     # [batch, seq, out_dim]
-            
-            if self.bias is not None:
-                out = out + self.bias
-                
-            return out
-
-def create_hybrid_sparse_lowrank_model(base_model, lowrank_model, args):
-    """
-    Create hybrid sparse+lowrank model for CoLA and LoST optimizers
-    """
-    sparse_layers = []
-    
-    for base_name, base_module in base_model.named_modules():
-        if isinstance(base_module, nn.Linear):
-            if any(t in base_name for t in ["attn", "mlp"]):
-                # Get corresponding lowrank module
-                lowrank_module = get_module_by_name(lowrank_model, base_name)
-                
-                if hasattr(lowrank_module, 'weight_in') and hasattr(lowrank_module, 'weight_out'):
-                    hybrid_layer = HybridSparseLinear(
-                        base_module.in_features,
-                        base_module.out_features,
-                        base_module.weight.data,
-                        lowrank_module,
-                        sparsity=args.lost_sparsity,
-                        sparse_method=args.lost_sparse_method,
-                        sparse_svd_rank=args.lost_sparse_svd_rank,
-                        gamma=args.lost_gamma,
-                        bias=base_module.bias is not None,
-                        cola_silu=args.cola_silu,
-                        cola_init=args.cola_init
-                    )
-                    
-                    sparse_layers.append(hybrid_layer)
-                    
-                    # Replace the module in lowrank_model
-                    parts = base_name.split('.')
-                    current = lowrank_model
-                    for part in parts[:-1]:
-                        current = getattr(current, part)
-                    setattr(current, parts[-1], hybrid_layer)
-    
-    return lowrank_model, sparse_layers
-
-def get_module_by_name(model, name):
-    """Get module by name"""
-    names = name.split('.')
-    module = model
-    for n in names:
-        module = getattr(module, n)
-    return module
 
 def extract_size_and_type(config_path):
     size_match = re.search(r'(\d+[mb])', config_path.lower())
@@ -486,9 +127,9 @@ def parse_args():
     parser.add_argument(
         "--activation_sparse_method",
         type=str,
-        default="naive",
+        default="mvue",
         choices=["naive", "mvue", "soft_threshold_weights", "soft_dynamic"],
-        help="Method for activation 2:4 sparsification: naive (default, top-2), mvue, soft_threshold_weights (weight MSE), soft_dynamic (dynamic activation MSE)"
+        help="Method for activation 2:4 sparsification: naive (top-2), mvue, soft_threshold_weights (weight MSE), soft_dynamic (dynamic activation MSE)"
     )
     parser.add_argument(
         "--2by4_permute",
@@ -517,13 +158,9 @@ def parse_args():
     )
     parser.add_argument(
         "--dx_direct_sparse",
-        type=int,
-        choices=[1, 2, 3],
-        default=1,
-        help=(
-            "Backward sparse strategy: 1=full split_gemm, 2=naive split_gemm, 3=dense chain rule. "
-            "Enable_permute 控制是否做输入/梯度 permutation。"
-        )
+        type=str_to_bool,
+        default=False,
+        help="If True, use direct naive sparse for dx computation instead of split-GEMM strategy in backward pass"
     )
     parser.add_argument(
         "--wandb_sparsityrelu",
@@ -537,6 +174,8 @@ def parse_args():
     parser.add_argument("--val_data_path", type=str, default="en/c4-validation.*.json.gz",
                         help="Path to C4 validation data files")
     parser.add_argument("--model_config", type=str, required=True)
+    parser.add_argument("--model_type", type=str, default="llama", choices=["llama", "t5"],
+                        help="Model type to train: 'llama' for LLaMA models, 't5' for T5 models")
     parser.add_argument("--use_hf_model", default=False, action="store_true")
     parser.add_argument("--continue_from", type=str, default=None)
     parser.add_argument("--batch_size", type=int, required=True)
@@ -599,31 +238,6 @@ def parse_args():
     parser.add_argument("--update_proj_gap", type=int, default=50)
     parser.add_argument("--galore_scale", type=float, default=1.0)
     parser.add_argument("--proj_type", type=str, default="std")
-
-    # CoLA and LoST parameters for adamw_cola and adamw_lost optimizers
-    parser.add_argument("--cola_silu", type=str_to_bool, default=False,
-                        help="Whether to add SiLU activation between A and B matrices in low-rank structures")
-    parser.add_argument("--cola_init", type=str_to_bool, default=False,
-                        help="Whether to use CoLA-style initialization for low-rank matrices")
-    parser.add_argument("--lost_sparsity", type=float, default=0.05,
-                        help="Column-wise sparsity ratio for LoST optimizer")
-    parser.add_argument("--lost_sparse_method", type=str, default="random",
-                        choices=["random", "gradient", "svd"],
-                        help="Method to initialize the sparse mask for LoST")
-    parser.add_argument("--lost_sparse_svd_rank", type=int, default=256,
-                        help="Rank to use for SVD-based mask initialization in LoST")
-    parser.add_argument("--lost_gamma", type=float, default=0.5,
-                        help="Blending coefficient between low-rank and sparse parts in LoST")
-    parser.add_argument("--lost_sparse_svd_inverse", action="store_true",
-                        help="Use inverse order (smallest singular values first) for sparse SVD selection")
-
-    # Momentum reset functionality  
-    parser.add_argument("--momentum_reset_steps", type=int, default=0,
-                        help="Reset Adam optimizer momentum every N steps. 0 means no reset. Works for all optimizer types.")
-
-    # More activation ReLU2 for CoLA/LoST
-    parser.add_argument("--more_activation_relu2", action="store_true",
-                        help="Use ReLU2 activation with activation sparsity (2:4) for CoLA/LoST low-rank matrices instead of default activations")
 
     # LORO parameters
     parser.add_argument(
@@ -737,7 +351,7 @@ def parse_args():
 
 @torch.no_grad()
 def evaluate_model(
-    model, preprocess_batched, pad_idx, global_rank, world_size, device, batch_size, c4_local
+    model, preprocess_batched, pad_idx, global_rank, world_size, device, batch_size, c4_local, model_type="llama", tokenizer=None
 ):
     _time = time.time()
     if args.c4_local:
@@ -784,9 +398,22 @@ def evaluate_model(
         total_batches += 1
 
         batch = {k: v.to(device) for k, v in batch.items()}
-        labels = batch["input_ids"].clone()
-        labels[labels == pad_idx] = -100
-        loss = model(**batch, labels=labels).loss
+        
+        if model_type == "llama":
+            labels = batch["input_ids"].clone()
+            labels[labels == pad_idx] = -100
+            loss = model(**batch, labels=labels).loss
+        elif model_type == "t5":
+            t5_batch = create_t5_denoising_batch(batch, tokenizer, max_length=512)
+            t5_batch = {k: v.to(device) for k, v in t5_batch.items()}
+            loss = model(
+                input_ids=t5_batch["input_ids"],
+                attention_mask=t5_batch["attention_mask"],
+                decoder_input_ids=t5_batch["decoder_input_ids"],
+                decoder_attention_mask=t5_batch["decoder_attention_mask"],
+                labels=t5_batch["labels"]
+            ).loss
+            
         total_loss += loss.detach()
 
         evaluated_on_tokens += (batch["input_ids"] != pad_idx).sum().item() * world_size
@@ -1007,13 +634,13 @@ def get_weight_sparsity_stats(model):
                 ('v_proj', attention.v_proj),
                 ('o_proj', attention.o_proj)
             ]:
-                if hasattr(proj_module, 'weight_in') and hasattr(proj_module, 'weight_out'):
-                    # LowRank/CoLA: 两个矩阵 weight_in 和 weight_out
+                if isinstance(proj_module, LowRankLinear):
+                    # LowRank: 两个矩阵 weight_in 和 weight_out
                     weight_in_sparsity = calculate_sparsity(proj_module.weight_in)
                     weight_out_sparsity = calculate_sparsity(proj_module.weight_out)
                     sparsity_stats[f'weight_sparsity/layer_{layer_idx}/attn_{proj_name}_in'] = weight_in_sparsity
                     sparsity_stats[f'weight_sparsity/layer_{layer_idx}/attn_{proj_name}_out'] = weight_out_sparsity
-                elif hasattr(proj_module, 'weight'):
+                else:
                     # Full-rank: 一个权重矩阵
                     weight_sparsity = calculate_sparsity(proj_module.weight)
                     sparsity_stats[f'weight_sparsity/layer_{layer_idx}/attn_{proj_name}'] = weight_sparsity
@@ -1027,13 +654,13 @@ def get_weight_sparsity_stats(model):
                 mlp_projs.append(('gate_proj', mlp.gate_proj))
             
             for proj_name, proj_module in mlp_projs:
-                if hasattr(proj_module, 'weight_in') and hasattr(proj_module, 'weight_out'):
-                    # LowRank/CoLA: 两个矩阵
+                if isinstance(proj_module, LowRankLinear):
+                    # LowRank: 两个矩阵
                     weight_in_sparsity = calculate_sparsity(proj_module.weight_in)
                     weight_out_sparsity = calculate_sparsity(proj_module.weight_out)
                     sparsity_stats[f'weight_sparsity/layer_{layer_idx}/mlp_{proj_name}_in'] = weight_in_sparsity
                     sparsity_stats[f'weight_sparsity/layer_{layer_idx}/mlp_{proj_name}_out'] = weight_out_sparsity
-                elif hasattr(proj_module, 'weight'):
+                else:
                     # Full-rank: 一个权重矩阵
                     weight_sparsity = calculate_sparsity(proj_module.weight)
                     sparsity_stats[f'weight_sparsity/layer_{layer_idx}/mlp_{proj_name}'] = weight_sparsity
@@ -1235,13 +862,12 @@ def main(args):
     if args.activation_2by4:
         logger.info(f"🔧 Activation 2:4 sparsity enabled with method: {args.activation_sparse_method}")
         logger.info(f"🔧 Dense warmup for first {args.activation_dense_warmup_steps} steps, then activation 2:4 sparsity")
-        mode_desc = {1: 'full split_gemm', 2: 'naive split_gemm', 3: 'dense chain rule'}.get(args.dx_direct_sparse, 'unknown')
-        logger.info(f"🔧 dx_direct_sparse = {args.dx_direct_sparse} ({mode_desc})")
+        logger.info(f"🔧 dx_direct_sparse = {args.dx_direct_sparse} ({'direct naive sparse' if args.dx_direct_sparse else 'split-GEMM strategy'})")
         
         # Configure activation 2:4 sparsity parameters
         model_config.activation_sparse_method = args.activation_sparse_method
         model_config.activation_dense_warmup_steps = args.activation_dense_warmup_steps
-        model_config.dx_direct_sparse = int(args.dx_direct_sparse)
+        model_config.dx_direct_sparse = args.dx_direct_sparse
         model_config.dynamic_activation_steps = args.dynamic_activation_steps
         model_config.activation_calibration_samples = args.activation_calibration_samples
         model_config.permute_2by4 = getattr(args, '2by4_permute', True)  # 使用getattr避免属性名中的特殊字符问题
@@ -1260,9 +886,16 @@ def main(args):
         args.loro_scope = "attn"
 
     if args.use_hf_model:
-        model: HF_LlamaForCausalLM = AutoModelForCausalLM.from_config(model_config)
+        if args.model_type == "llama":
+            model: HF_LlamaForCausalLM = AutoModelForCausalLM.from_config(model_config)
+        elif args.model_type == "t5":
+            from transformers import T5ForConditionalGeneration as HF_T5ForConditionalGeneration
+            model = HF_T5ForConditionalGeneration.from_config(model_config)
     else:
-        model = LlamaForCausalLM(model_config)
+        if args.model_type == "llama":
+            model = LlamaForCausalLM(model_config)
+        elif args.model_type == "t5":
+            model = T5ForConditionalGeneration(model_config)
 
     # Initialize sparsity recording if enabled
     if args.wandb_sparsityrelu and ActivationSparse2to4Function is not None:
@@ -1581,128 +1214,6 @@ def main(args):
 
         layer_wise_flag = True
 
-    ## NOTE: CoLA and LoST optimizers - create models before LORO optimizer
-    elif args.optimizer.lower() in ["adamw_cola", "adamw_lost", "cola_adamw", "lost_adamw"]:
-        # Apply low-rank parameterization with CoLA/LoST features
-        from loro_torch.lowrank_module import apply_lowrank_param, get_lowrank_param
-        
-        # Fix scheduler compatibility for CoLA/LoST optimizers
-        if args.lr_adjust_steps != 0 and args.scheduler not in ["cosine_restart", "cosine_restart_zero"]:
-            print(f"⚠️  Warning: Setting lr_adjust_steps=0 for {args.scheduler} scheduler compatibility")
-            args.lr_adjust_steps = 0
-        
-        if args.loro_scope is not None:
-            # Step 1: Apply standard low-rank parameterization first
-            apply_lowrank_param(
-                model,
-                model_config,
-                model_type="llama",
-                scope=args.loro_scope,
-                attn_rank=args.loro_attn_rank,
-                mlp_rank=args.loro_mlp_rank,
-                init=args.loro_init,
-            )
-            print("✅ LORO low-rank parameterization applied!")
-            
-            # Step 2: Apply CoLA or LoST specific modifications
-            if args.optimizer.lower() in ["adamw_cola", "cola_adamw"]:
-                # CoLA: Replace LowRankLinear modules with CoLA versions (SiLU activation)
-                print("🔧 Applying CoLA SiLU activation to LowRankLinear modules")
-                cola_count = 0
-                
-                for name, module in model.named_modules():
-                    if hasattr(module, 'weight_in') and hasattr(module, 'weight_out'):
-                        # This is a LowRankLinear module - replace with CoLA version (with more_activation_relu2 support)
-                        cola_module = CoLALowRankLinear(
-                            module,
-                            more_activation_relu2=args.more_activation_relu2,
-                            activation_sparse_method=args.activation_sparse_method,
-                            activation_dense_warmup_steps=args.activation_dense_warmup_steps,
-                            activation_2by4_permute=getattr(args, '_2by4_permute', True),
-                            dx_direct_sparse=int(getattr(args, 'dx_direct_sparse', 1)),
-                            dynamic_activation_steps=int(getattr(args, 'dynamic_activation_steps', 10)),
-                            activation_calibration_samples=int(getattr(args, 'activation_calibration_samples', 100)),
-                            cola_init=bool(getattr(args, 'cola_init', False)),
-                        )
-                        
-                        # Replace the module in the model
-                        parts = name.split('.')
-                        current = model
-                        for part in parts[:-1]:
-                            current = getattr(current, part)
-                        setattr(current, parts[-1], cola_module)
-                        cola_count += 1
-                
-                if args.more_activation_relu2:
-                    print(f"✅ Applied CoLA ReLU² + activation 2:4 sparsity to {cola_count} LowRankLinear modules")
-                else:
-                    print(f"✅ Applied CoLA SiLU activation to {cola_count} LowRankLinear modules")
-                # 若 CoLA 也需要初始化列稀疏mask（与 LoST 同步需求）
-                # 为 CoLALowRankLinear 不创建稀疏分支，仅按需执行 CoLA 初始化（已在模块构造时支持 cola_init）
-                
-            elif args.optimizer.lower() in ["adamw_lost", "lost_adamw"]:
-                # LoST: Replace LowRankLinear modules with hybrid sparse+low-rank versions  
-                print(f"🔧 LoST features enabled: column-wise sparsity ({args.lost_sparsity})")
-                
-                lost_count = 0
-                for name, module in model.named_modules():
-                    if hasattr(module, 'weight_in') and hasattr(module, 'weight_out'):
-                        # This is a LowRankLinear module - replace with LoST version
-                        # Create a dummy original_weight from the low-rank decomposition with correct dtype/device
-                        with torch.no_grad():
-                            dummy_weight = (module.weight_out @ module.weight_in.T).detach().clone()  # Reconstruct full weight
-                        
-                        lost_module = HybridSparseLinear(
-                            in_features=module.in_dim,
-                            out_features=module.out_dim,
-                            original_weight=dummy_weight,
-                            lowrank_module=module,
-                            sparsity=args.lost_sparsity,
-                            sparse_method=args.lost_sparse_method,
-                            sparse_svd_rank=args.lost_sparse_svd_rank,
-                            sparse_svd_inverse=args.lost_sparse_svd_inverse,
-                            rank=args.rank,
-                            gamma=args.lost_gamma,
-                            cola_silu=False,  # LoST doesn't use CoLA SiLU
-                            more_activation_relu2=args.more_activation_relu2,
-                            activation_sparse_method=args.activation_sparse_method,
-                            activation_dense_warmup_steps=args.activation_dense_warmup_steps,
-                            activation_2by4_permute=getattr(args, '_2by4_permute', True)
-                        )
-                        
-                        # Initialize the sparse mask (LoST 列稀疏 + 可选 CoLA 初始化)
-                        lost_module.initialize_mask()
-                        
-                        # Replace the module in the model
-                        parts = name.split('.')
-                        current = model
-                        for part in parts[:-1]:
-                            current = getattr(current, part)
-                        setattr(current, parts[-1], lost_module)
-                        lost_count += 1
-                
-                if args.more_activation_relu2:
-                    print(f"✅ Applied LoST hybrid processing + ReLU² activation 2:4 sparsity to {lost_count} LowRankLinear modules")
-                else:
-                    print(f"✅ Applied LoST hybrid processing to {lost_count} LowRankLinear modules")
-        
-        # 重要：在CoLA/LoST模块替换后，再次确保整个模型使用正确的dtype
-        if args.dtype in ["bf16", "bfloat16"]:
-            model = model.to(device=device, dtype=torch.bfloat16)
-            print("✅ 在CoLA/LoST模块替换后，重新转换模型为bfloat16")
-        else:
-            Warning(f"\nUsing full-rank model for {args.optimizer} ...\n")
-        
-        # Get parameter groups
-        param_groups = get_lowrank_param(model, model_config, args.loro_lr_scaler, args.weight_decay)
-        
-        optimizer = torch.optim.AdamW(
-            param_groups,
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            betas=(0.9, 0.95)
-        )
-
     ## NOTE: LORO optimizer
     elif args.optimizer.lower() == "loro_adamw":
         # Always use standard LORO implementation as the base
@@ -1719,7 +1230,7 @@ def main(args):
             apply_lowrank_param(
                 model,
                 model_config,
-                model_type="llama",
+                model_type=args.model_type,
                 scope=args.loro_scope,
                 attn_rank=args.loro_attn_rank,
                 mlp_rank=args.loro_mlp_rank,
@@ -1809,7 +1320,7 @@ def main(args):
         else:
             cycle_length = None
             restart_warmup_steps = None
-            lr_adjust_steps = 0  # Must be 0, not None, to avoid scheduler error
+            lr_adjust_steps = None
             lr_jag_after_warmup = None
             Warning(f"\nUsing normal {args.scheduler} lr schedule ...\n")
 
@@ -1912,11 +1423,22 @@ def main(args):
             break
 
         batch = {k: v.to(device) for k, v in batch.items()}
-        labels = batch["input_ids"].clone()
-        labels[labels == pad_idx] = -100
         tokens_seen += (batch["input_ids"] != pad_idx).sum().item() * world_size
 
-        loss = model(**batch, labels=labels).loss
+        if args.model_type == "llama":
+            labels = batch["input_ids"].clone()
+            labels[labels == pad_idx] = -100
+            loss = model(**batch, labels=labels).loss
+        elif args.model_type == "t5":
+            t5_batch = create_t5_denoising_batch(batch, tokenizer, max_length=args.max_length)
+            t5_batch = {k: v.to(device) for k, v in t5_batch.items()}
+            loss = model(
+                input_ids=t5_batch["input_ids"],
+                attention_mask=t5_batch["attention_mask"],
+                decoder_input_ids=t5_batch["decoder_input_ids"],
+                decoder_attention_mask=t5_batch["decoder_attention_mask"],
+                labels=t5_batch["labels"]
+            ).loss
         
         # 🔍 Enhanced NaN Detection and Early Stopping
         if torch.isnan(loss) or torch.isinf(loss):
@@ -2088,31 +1610,10 @@ def main(args):
                 use_exact_loro = None
                 optimizer.step()
 
-            # Momentum reset functionality (works for all optimizer types)
-            if args.momentum_reset_steps > 0 and update_step % args.momentum_reset_steps == 0:
-                reset_count = reset_optimizer_momentum(optimizer)
-                if reset_count > 0:
-                    print(f"🔄 Step {update_step}: Reset momentum for {reset_count} parameters")
-
             scheduler.step()
             optimizer.zero_grad()
 
         update_step += 1
-        
-        # Momentum reset for layer-wise optimizers 
-        if layer_wise_flag and args.momentum_reset_steps > 0 and update_step % args.momentum_reset_steps == 0:
-            total_reset_count = 0
-            if 'optimizer_dict' in locals():
-                for param, opt in optimizer_dict.items():
-                    reset_count = reset_optimizer_momentum(opt)
-                    total_reset_count += reset_count
-            if total_reset_count > 0:
-                print(f"🔄 Step {update_step}: Reset momentum for {total_reset_count} parameters (layer-wise)")
-        
-        # Update CoLA/LoST activation sparse step counter for dense warmup
-        if hasattr(args, 'more_activation_relu2') and args.more_activation_relu2:
-            from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunctionSingle
-            ActivationSparse2to4LowRankFunctionSingle._training_step = update_step
         
         # Update activation sparse step counter for dense warmup
         if args.activation_2by4:
@@ -2306,7 +1807,9 @@ def main(args):
                 world_size,
                 device,
                 args.batch_size,
-                args.c4_local
+                args.c4_local,
+                args.model_type,
+                tokenizer
             )
             if global_rank == 0 and wandb is not None:
                 wandb.log(
@@ -2404,7 +1907,9 @@ def main(args):
         world_size,
         device,
         args.batch_size,
-        args.c4_local
+        args.c4_local,
+        args.model_type,
+        tokenizer
     )
 
     if global_rank == 0 and wandb is not None:

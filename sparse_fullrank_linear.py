@@ -17,6 +17,11 @@ from typing import Optional, List
 # Import the exact same functions as original 2by4-pretrain-acc-examples
 from sparse import matmul, MVUE24_approx_triton, soft_threshold24_triton
 
+# Triton imports for custom kernels
+import triton
+import triton.language as tl
+_TRITON_AVAILABLE = True
+
 
 def calculate_mask_from_sparse_weights(sparse_weights):
     """从稀疏权重计算mask"""
@@ -39,6 +44,96 @@ def fake_fp8_mm(a, b, dtype):
         output = output.to(torch.bfloat16)
     
     return output
+
+
+# ------------------------------
+# Naive 2:4 Triton implementation
+# ------------------------------
+if _TRITON_AVAILABLE:
+    @triton.jit
+    def _naive24_kernel(
+        X_ptr, Y_ptr,
+        M, N,
+        stride_x_m, stride_x_n,
+        stride_y_m, stride_y_n,
+    ):
+        pid = tl.program_id(0)
+        groups_per_row = N // 4
+        row = pid // groups_per_row
+        group = pid % groups_per_row
+        # Guard rows
+        if row >= M:
+            return
+        base_n = group * 4
+        offs = base_n + tl.arange(0, 4)
+        mask = offs < N
+        x = tl.load(X_ptr + row * stride_x_m + offs * stride_x_n, mask=mask, other=0.0)
+        absx = tl.abs(x)
+
+        # Vectorized top-2 via reductions (avoid scalar indexing)
+        # 1) top-1 value and mask
+        max1_val = tl.max(absx, axis=0)
+        mask1 = absx == max1_val
+
+        # 2) suppress top-1 and find top-2 value and mask
+        suppressed = tl.where(mask1, -1.0, absx)
+        max2_val = tl.max(suppressed, axis=0)
+        mask2 = suppressed == max2_val
+
+        keep = mask1 | mask2
+        y = tl.where(keep, x, 0.0)
+        tl.store(Y_ptr + row * stride_y_m + offs * stride_y_n, y, mask=mask)
+
+
+def naive24_triton(x: torch.Tensor):
+    """Naive 2:4 sparsification using a Triton kernel.
+
+    Keeps the top-2 by absolute value in every group of 4 along the last dimension.
+    Returns the sparsified tensor. If Triton is unavailable, falls back to a PyTorch implementation.
+    """
+    assert x.dim() == 2, "naive24_triton expects a 2D tensor [M, N]"
+    M, N = x.shape
+    if N % 4 != 0:
+        # Graceful fallback: handle tail by dense copy
+        N_main = (N // 4) * 4
+    else:
+        N_main = N
+
+    # Convert to fp16 for Triton kernels (bfloat16 -> float16)
+    original_dtype = x.dtype
+    x16 = x.to(torch.float16).contiguous()
+    y16 = torch.zeros_like(x16)
+
+    if _TRITON_AVAILABLE and N_main > 0:
+        grid = (int(M * (N_main // 4)),)
+        _naive24_kernel[grid](
+            x16, y16,
+            M, N_main,
+            x16.stride(0), x16.stride(1),
+            y16.stride(0), y16.stride(1),
+        )
+        # Copy tail (if any) without sparsifying
+        if N_main != N:
+            y16[:, N_main:] = x16[:, N_main:]
+    else:
+        # PyTorch fallback
+        y16.copy_(x16)
+        if N_main > 0:
+            x_main = x16[:, :N_main].view(M, -1, 4)
+            y_main = y16[:, :N_main].view(M, -1, 4)
+            abs_main = x_main.abs()
+            # Top-2 mask in each group of 4
+            top2_vals, top2_idx = torch.topk(abs_main, k=2, dim=-1, largest=True, sorted=False)
+            mask = torch.zeros_like(x_main, dtype=torch.bool)
+            # Gather-based assignment for mask
+            arange_m = torch.arange(mask.shape[0], device=mask.device).view(-1, 1, 1)
+            arange_g = torch.arange(mask.shape[1], device=mask.device).view(1, -1, 1)
+            mask[arange_m, arange_g, top2_idx] = True
+            y_main[~mask] = 0
+
+    if original_dtype == torch.bfloat16:
+        return y16.to(torch.bfloat16)
+    return y16
 
 
 class ActivationSparse2to4SoftThreshold(autograd.Function):
