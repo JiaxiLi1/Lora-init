@@ -1158,9 +1158,9 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
         # dy2 = dy3 @ weight_out
         dy2 = torch.mm(dy3, weight_out)                  # [B*S, rank]
 
-        # Backprop through ReLU²
-        relu_y1 = torch.where(y1 > 0, y1, torch.zeros_like(y1))
-        dy1 = 2 * dy2 * relu_y1
+        # Backprop through ReLU²: d/dx[ReLU²(x)] = 2*x if x > 0, else 0
+        # Note: y1 is the value before ReLU²
+        dy1 = torch.where(y1 > 0, 2 * y1 * dy2, torch.zeros_like(dy2))
 
         grad_input = grad_weight_in = grad_weight_out = grad_bias = None
 

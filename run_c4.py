@@ -354,9 +354,9 @@ class CoLALowRankLinear(nn.Module):
                 x, self.weight_in, self.weight_out, self.bias,
                 self.activation_sparse_method,
                 self.activation_dense_warmup_steps,
-                getattr(self, 'dx_direct_sparse', False),
-                getattr(self, 'dynamic_activation_steps', 10),
-                getattr(self, 'activation_calibration_samples', 100),
+                self.dx_direct_sparse,
+                self.dynamic_activation_steps,
+                self.activation_calibration_samples,
                 self.activation_2by4_permute,
             )
         else:
@@ -491,9 +491,9 @@ def parse_args():
         help="Method for activation 2:4 sparsification: naive (default, top-2), mvue, soft_threshold_weights (weight MSE), soft_dynamic (dynamic activation MSE)"
     )
     parser.add_argument(
-        "--2by4_permute",
+        "--permute_2by4",
         type=str_to_bool,
-        default=True,
+        default=False,
         help="Enable input permutation during activation 2:4 sparsity training. Set to False to disable permutation for better warmup consistency."
     )
     parser.add_argument(
@@ -1244,7 +1244,7 @@ def main(args):
         model_config.dx_direct_sparse = int(args.dx_direct_sparse)
         model_config.dynamic_activation_steps = args.dynamic_activation_steps
         model_config.activation_calibration_samples = args.activation_calibration_samples
-        model_config.permute_2by4 = getattr(args, '2by4_permute', True)  # 使用getattr避免属性名中的特殊字符问题
+        model_config.permute_2by4 = args.permute_2by4  # Must use getattr for names starting with digits
     
     if "geomlrk" in args.optimizer and args.loro_mlp_dense:
         mlp_rank = min(model_config.intermediate_size, args.loro_mlp_rank)
@@ -1282,6 +1282,13 @@ def main(args):
     beginning_step = 0
     tokens_seen = 0
     tokens_seen_before = 0
+    
+    # Initialize CoLA/LoST activation sparse settings if using more_activation_relu2
+    if hasattr(args, 'more_activation_relu2') and args.more_activation_relu2:
+        from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunctionSingle
+        ActivationSparse2to4LowRankFunctionSingle._training_step = 0
+        ActivationSparse2to4LowRankFunctionSingle._warmup_steps = args.activation_dense_warmup_steps
+        logger.info(f"🔧 Initialized CoLA/LoST activation sparse: warmup_steps={args.activation_dense_warmup_steps}")
 
     if args.dtype in ["bf16", "bfloat16"]:
         model = model.to(device=device, dtype=torch.bfloat16)
@@ -1582,7 +1589,7 @@ def main(args):
         layer_wise_flag = True
 
     ## NOTE: CoLA and LoST optimizers - create models before LORO optimizer
-    elif args.optimizer.lower() in ["adamw_cola", "adamw_lost", "cola_adamw", "lost_adamw"]:
+    elif args.optimizer.lower() in ["cola_adamw", "lost_adamw"]:
         # Apply low-rank parameterization with CoLA/LoST features
         from loro_torch.lowrank_module import apply_lowrank_param, get_lowrank_param
         
@@ -1618,11 +1625,11 @@ def main(args):
                             more_activation_relu2=args.more_activation_relu2,
                             activation_sparse_method=args.activation_sparse_method,
                             activation_dense_warmup_steps=args.activation_dense_warmup_steps,
-                            activation_2by4_permute=getattr(args, '_2by4_permute', True),
-                            dx_direct_sparse=int(getattr(args, 'dx_direct_sparse', 1)),
-                            dynamic_activation_steps=int(getattr(args, 'dynamic_activation_steps', 10)),
-                            activation_calibration_samples=int(getattr(args, 'activation_calibration_samples', 100)),
-                            cola_init=bool(getattr(args, 'cola_init', False)),
+                            activation_2by4_permute=args.permute_2by4,  # Must use getattr for names starting with digits
+                            dx_direct_sparse=args.dx_direct_sparse,
+                            dynamic_activation_steps=args.dynamic_activation_steps,
+                            activation_calibration_samples=args.activation_calibration_samples,
+                            cola_init=args.cola_init,
                         )
                         
                         # Replace the module in the model
@@ -1667,7 +1674,7 @@ def main(args):
                             more_activation_relu2=args.more_activation_relu2,
                             activation_sparse_method=args.activation_sparse_method,
                             activation_dense_warmup_steps=args.activation_dense_warmup_steps,
-                            activation_2by4_permute=getattr(args, '_2by4_permute', True)
+                            activation_2by4_permute=args.permute_2by4
                         )
                         
                         # Initialize the sparse mask (LoST 列稀疏 + 可选 CoLA 初始化)
@@ -2113,6 +2120,11 @@ def main(args):
         if hasattr(args, 'more_activation_relu2') and args.more_activation_relu2:
             from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunctionSingle
             ActivationSparse2to4LowRankFunctionSingle._training_step = update_step
+            # Log warmup status for CoLA/LoST
+            if update_step == args.activation_dense_warmup_steps:
+                logger.info(f"🔧 CoLA/LoST dense warmup completed at step {update_step}. Activation 2:4 sparsity now enabled.")
+            elif update_step < args.activation_dense_warmup_steps and update_step % 100 == 0:
+                logger.info(f"🔧 CoLA/LoST dense warmup progress: {update_step}/{args.activation_dense_warmup_steps} steps")
         
         # Update activation sparse step counter for dense warmup
         if args.activation_2by4:
