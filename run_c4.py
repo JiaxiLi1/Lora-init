@@ -114,7 +114,7 @@ class HybridSparseLinear(nn.Module):
             gamma: float = 0.5,
             bias: bool = True,
             cola_silu: bool = False,
-            cola_init: bool = False,
+            cola_sparse_method: str = "cola_init",
             more_activation_relu2: bool = False,
             activation_sparse_method: str = "mvue",
             activation_dense_warmup_steps: int = 1000,
@@ -125,7 +125,7 @@ class HybridSparseLinear(nn.Module):
         self.out_features = out_features
         self.lowrank_module = lowrank_module
         self.cola_silu = cola_silu
-        self.cola_init = cola_init
+        self.cola_sparse_method = cola_sparse_method
         
         # More activation ReLU2 configuration
         self.more_activation_relu2 = more_activation_relu2
@@ -161,7 +161,23 @@ class HybridSparseLinear(nn.Module):
     def initialize_mask(self, gradient=None):
         """Initialize column-wise sparse mask and CoLA initialization if enabled"""
         with torch.no_grad():
-            if self.cola_init:
+            if self.cola_sparse_method == "svd":
+                # Initialize low-rank matrices using SVD decomposition
+                weight_float = self.original_weight.to(torch.float32)
+                U, S, Vh = torch.linalg.svd(weight_float, full_matrices=False)
+                
+                rank = self.lowrank_module.rank
+                # Take the top 'rank' singular values/vectors
+                U_k = U[:, :rank]
+                S_k = S[:rank]
+                Vh_k = Vh[:rank, :]
+                
+                # Initialize weight_in as U_k * sqrt(S_k)
+                # Initialize weight_out as sqrt(S_k) * Vh_k
+                S_sqrt = torch.sqrt(S_k)
+                self.lowrank_module.weight_in.data.copy_((U_k * S_sqrt).T.to(self.lowrank_module.weight_in.dtype))
+                self.lowrank_module.weight_out.data.copy_((S_sqrt.unsqueeze(1) * Vh_k).to(self.lowrank_module.weight_out.dtype))
+            elif self.cola_sparse_method == "cola_init":
                 # Initialize low-rank matrices using CoLA style initialization
                 target_sdv = (self.in_features + self.out_features) ** (-1 / 2)
                 rank = self.lowrank_module.rank
@@ -306,7 +322,8 @@ class CoLALowRankLinear(nn.Module):
                  dx_direct_sparse: int = 1,
                  dynamic_activation_steps: int = 10,
                  activation_calibration_samples: int = 100,
-                 cola_init: bool = False):
+                 cola_sparse_method: str = "cola_init",
+                 original_weight=None):
         super().__init__()
         # Copy all attributes from original LowRankLinear module
         self.in_dim = original_module.in_dim
@@ -330,12 +347,37 @@ class CoLALowRankLinear(nn.Module):
             # Default CoLA: use SiLU
             self.lr_act = ACT2FN["silu"]
 
-        # 可选：CoLA 初始化（对低秩矩阵 A、B 做 CoLA-style 初始化）
-        if cola_init:
-            with torch.no_grad():
+        # CoLA 初始化（对低秩矩阵 A、B 做初始化）
+        with torch.no_grad():
+            if cola_sparse_method == "svd" and original_weight is not None:
+                # SVD-based initialization
+                weight_float = original_weight.to(torch.float32)
+                U, S, Vh = torch.linalg.svd(weight_float, full_matrices=False)
+                
+                rank = min(self.weight_in.shape[1], self.weight_out.shape[1])
+                # Take the top 'rank' singular values/vectors
+                U_k = U[:, :rank]
+                S_k = S[:rank]
+                Vh_k = Vh[:rank, :]
+                
+                # Initialize weight_in as U_k * sqrt(S_k) (transposed to match expected shape)
+                # Initialize weight_out as sqrt(S_k) * Vh_k (transposed to match expected shape)
+                S_sqrt = torch.sqrt(S_k)
+                self.weight_in.data.copy_((U_k * S_sqrt).to(self.weight_in.dtype))
+                self.weight_out.data.copy_((S_sqrt.unsqueeze(1) * Vh_k).T.to(self.weight_out.dtype))
+            elif cola_sparse_method == "cola_init":
+                # Original CoLA-style initialization
                 target_sdv = (self.in_dim + self.out_dim) ** (-0.5)
                 rank = min(self.weight_in.shape[1], self.weight_out.shape[1])
-                scale_factor = (rank ** (-0.25)) * (target_sdv ** 0.5)
+                
+                # Adjust scale factor based on activation function
+                if more_activation_relu2:
+                    # ReLU² has stronger gradients, use smaller initialization
+                    scale_factor = (rank ** (-0.25)) * (target_sdv ** 0.5) * 0.5
+                else:
+                    # SiLU activation, use original scale
+                    scale_factor = (rank ** (-0.25)) * (target_sdv ** 0.5)
+                
                 dtype_in = self.weight_in.dtype
                 dtype_out = self.weight_out.dtype
                 device = self.weight_in.device
@@ -603,8 +645,9 @@ def parse_args():
     # CoLA and LoST parameters for adamw_cola and adamw_lost optimizers
     parser.add_argument("--cola_silu", type=str_to_bool, default=False,
                         help="Whether to add SiLU activation between A and B matrices in low-rank structures")
-    parser.add_argument("--cola_init", type=str_to_bool, default=False,
-                        help="Whether to use CoLA-style initialization for low-rank matrices")
+    parser.add_argument("--cola_sparse_method", type=str, default="cola_init",
+                        choices=["cola_init", "svd"],
+                        help="Initialization method for CoLA low-rank matrices: cola_init (original) or svd")
     parser.add_argument("--lost_sparsity", type=float, default=0.05,
                         help="Column-wise sparsity ratio for LoST optimizer")
     parser.add_argument("--lost_sparse_method", type=str, default="random",
@@ -1270,9 +1313,13 @@ def main(args):
         # Enable sparsity logging in both activation sparse functions
         ActivationSparse2to4Function._wandb_sparsityrelu_enabled = True
         ActivationSparse2to4LowRankFunction._wandb_sparsityrelu_enabled = True
-        # Initialize global training step counter for both versions
+        # Also enable for single low-rank function (CoLA/LoST)
+        from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunctionSingle
+        ActivationSparse2to4LowRankFunctionSingle._wandb_sparsityrelu_enabled = True
+        # Initialize global training step counter for all versions
         ActivationSparse2to4Function._global_training_step = 0
         ActivationSparse2to4LowRankFunction._global_training_step = 0
+        ActivationSparse2to4LowRankFunctionSingle._global_training_step = 0
 
     if args.activation_checkpointing:
         model.gradient_checkpointing_enable()
@@ -1620,6 +1667,13 @@ def main(args):
                 for name, module in model.named_modules():
                     if hasattr(module, 'weight_in') and hasattr(module, 'weight_out'):
                         # This is a LowRankLinear module - replace with CoLA version (with more_activation_relu2 support)
+                        # Construct original weight if needed for SVD initialization
+                        original_weight = None
+                        if args.cola_sparse_method == "svd":
+                            # Try to reconstruct the original weight from low-rank decomposition
+                            # Note: This is an approximation as we only have the low-rank representation
+                            original_weight = module.weight_out.T @ module.weight_in.T
+                        
                         cola_module = CoLALowRankLinear(
                             module,
                             more_activation_relu2=args.more_activation_relu2,
@@ -1629,7 +1683,8 @@ def main(args):
                             dx_direct_sparse=args.dx_direct_sparse,
                             dynamic_activation_steps=args.dynamic_activation_steps,
                             activation_calibration_samples=args.activation_calibration_samples,
-                            cola_init=args.cola_init,
+                            cola_sparse_method=args.cola_sparse_method,
+                            original_weight=original_weight,
                         )
                         
                         # Replace the module in the model
@@ -1910,6 +1965,9 @@ def main(args):
             # Also set for low-rank version
             if ActivationSparse2to4LowRankFunction is not None:
                 ActivationSparse2to4LowRankFunction._global_training_step = global_step
+            # Also set for single low-rank version (CoLA/LoST)
+            from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunctionSingle
+            ActivationSparse2to4LowRankFunctionSingle._global_training_step = global_step
 
         if update_step > args.num_training_steps:
             logger.info(
@@ -2278,6 +2336,13 @@ def main(args):
                 sparsity_stats = LlamaMLP.get_sparsity_stats()
                 if sparsity_stats:
                     wandb_dict.update(sparsity_stats)
+                
+                # Add low-rank activation sparsity statistics (CoLA/LoST)
+                if args.more_activation_relu2:
+                    from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunctionSingle
+                    lowrank_sparsity_stats = ActivationSparse2to4LowRankFunctionSingle.get_lowrank_sparsity_stats()
+                    if lowrank_sparsity_stats:
+                        wandb_dict.update(lowrank_sparsity_stats)
             
             # Add weight sparsity statistics for all network layers
             weight_sparsity_stats = get_weight_sparsity_stats(model)

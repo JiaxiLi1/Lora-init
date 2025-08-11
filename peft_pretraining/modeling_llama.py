@@ -1094,6 +1094,10 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
         y1 = intermediate                                      # alias for clarity
         y2 = torch.where(y1 > 0, y1 * y1, torch.zeros_like(y1))  # ReLU²
 
+        # Record sparsity statistics if enabled
+        if hasattr(ActivationSparse2to4LowRankFunctionSingle, '_wandb_sparsityrelu_enabled') and ActivationSparse2to4LowRankFunctionSingle._wandb_sparsityrelu_enabled:
+            ActivationSparse2to4LowRankFunctionSingle._record_activation_sparsity_static(y2)
+
         if ActivationSparse2to4LowRankFunctionSingle._training_step < ActivationSparse2to4LowRankFunctionSingle._warmup_steps:
             y2_sparse = y2
             ctx.is_warmup = True
@@ -1223,6 +1227,68 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
     @staticmethod
     def set_warmup_steps(steps):
         ActivationSparse2to4LowRankFunctionSingle._warmup_steps = steps
+
+    @staticmethod
+    def _record_activation_sparsity_static(activated_tensor, layer_id=None):
+        """
+        Static method to record activation sparsity for low-rank CoLA/LoST
+        """
+        try:
+            # Get current training step from the class variable set by main training loop
+            current_step = getattr(ActivationSparse2to4LowRankFunctionSingle, '_global_training_step', 0)
+        except Exception as e:
+            current_step = 0
+        
+        # Initialize recording state for this step if needed
+        if not hasattr(ActivationSparse2to4LowRankFunctionSingle, '_last_recorded_step'):
+            ActivationSparse2to4LowRankFunctionSingle._last_recorded_step = -1
+            ActivationSparse2to4LowRankFunctionSingle._current_step_layer_count = 0
+        
+        # Reset layer counter for new step
+        if current_step != ActivationSparse2to4LowRankFunctionSingle._last_recorded_step:
+            ActivationSparse2to4LowRankFunctionSingle._last_recorded_step = current_step
+            ActivationSparse2to4LowRankFunctionSingle._current_step_layer_count = 0
+            # Initialize sparsity accumulator for this step
+            if not hasattr(ActivationSparse2to4LowRankFunctionSingle, '_lowrank_sparsity_stats'):
+                ActivationSparse2to4LowRankFunctionSingle._lowrank_sparsity_stats = {}
+        
+        # Increment layer counter
+        layer_idx = ActivationSparse2to4LowRankFunctionSingle._current_step_layer_count
+        ActivationSparse2to4LowRankFunctionSingle._current_step_layer_count += 1
+        
+        # Calculate sparsity
+        if isinstance(activated_tensor, tuple):
+            activated_tensor = activated_tensor[0]
+        
+        # Calculate sparsity percentage (percentage of zeros)
+        num_zeros = (activated_tensor == 0).sum().item()
+        total_elements = activated_tensor.numel()
+        sparsity = num_zeros / total_elements if total_elements > 0 else 0.0
+        
+        # Store in dict
+        ActivationSparse2to4LowRankFunctionSingle._lowrank_sparsity_stats[f"lowrank_relu2_sparsity/layer_{layer_idx}"] = sparsity
+
+    @staticmethod
+    def get_lowrank_sparsity_stats():
+        """
+        Get current low-rank sparsity statistics for all layers
+        Returns dict suitable for wandb logging
+        """
+        if not hasattr(ActivationSparse2to4LowRankFunctionSingle, '_lowrank_sparsity_stats'):
+            return {}
+        
+        stats = ActivationSparse2to4LowRankFunctionSingle._lowrank_sparsity_stats.copy()
+        
+        # Calculate average if we have data
+        if stats:
+            sparsities = [v for k, v in stats.items() if 'layer_' in k]
+            if sparsities:
+                stats['lowrank_relu2_sparsity/average'] = sum(sparsities) / len(sparsities)
+        
+        # Clear for next step
+        ActivationSparse2to4LowRankFunctionSingle._lowrank_sparsity_stats = {}
+        
+        return stats
 
 
 # Aliases for clarity/use in CoLA/LoST paths
