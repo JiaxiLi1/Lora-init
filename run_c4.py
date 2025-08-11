@@ -1672,7 +1672,11 @@ def main(args):
                         if args.cola_sparse_method == "svd":
                             # Try to reconstruct the original weight from low-rank decomposition
                             # Note: This is an approximation as we only have the low-rank representation
-                            original_weight = module.weight_out.T @ module.weight_in.T
+                            # weight_in: [in_features, rank], weight_out: [out_features, rank]
+                            # Forward uses: x @ weight_in @ weight_out.T
+                            # So effective weight is: weight_in @ weight_out.T = [in_features, out_features]
+                            # We need [out_features, in_features] for standard linear layer, so transpose
+                            original_weight = (module.weight_in @ module.weight_out.T).T
                         
                         cola_module = CoLALowRankLinear(
                             module,
@@ -1712,7 +1716,9 @@ def main(args):
                         # This is a LowRankLinear module - replace with LoST version
                         # Create a dummy original_weight from the low-rank decomposition with correct dtype/device
                         with torch.no_grad():
-                            dummy_weight = (module.weight_out @ module.weight_in.T).detach().clone()  # Reconstruct full weight
+                            # Forward uses: x @ weight_in @ weight_out.T, so effective weight is weight_in @ weight_out.T
+                            # We need [out_features, in_features] for standard linear layer, so transpose
+                            dummy_weight = (module.weight_in @ module.weight_out.T).T.detach().clone()  # Reconstruct full weight
                         
                         lost_module = HybridSparseLinear(
                             in_features=module.in_dim,
