@@ -65,6 +65,21 @@ except ImportError:
         "This function is required for activation 2:4 sparsity."
     )
 
+# Import optimized fused sparsity operations
+try:
+    from fused_sparsity_ops import (
+        fused_gemm_forward_with_sparsity,
+        compute_split_gemm_dw_with_cached_sparsity,
+        sparsity_tracker
+    )
+    FUSED_SPARSITY_AVAILABLE = True
+except ImportError:
+    raise RuntimeError(
+        "❌ CRITICAL: Fused sparsity operations are required!\n"
+        "Please ensure fused_sparsity_ops.py and triton_gemm_sparsity.py are available.\n"
+        "No fallback implementations are allowed as per user requirements."
+    )
+
 logger = logging.get_logger(__name__)
 
 _CONFIG_FOR_DOC = "LlamaConfig"
@@ -74,74 +89,27 @@ def compute_split_gemm_dw2_lowrank(y2, d_intermediate_2, y2_forward, weight_in2)
     """
     计算低秩层的 weight_in2 梯度使用 Split-GEMM 策略
     grad_weight_in2 = y2.T @ d_intermediate_2，但使用95%/5%特征分割
+    使用优化的fused kernel避免重复计算sparsity
     """
-    batch_seq_len, intermediate_size = y2.shape
-    rank2 = d_intermediate_2.shape[1]
-    
-    # 分析特征稀疏性
-    feature_sparsity = torch.mean((y2_forward != 0).float(), dim=0)  # [intermediate_size]
-    
-    # 选择95%的特征作为稀疏特征
-    num_sparse_features = int(0.95 * intermediate_size)
-    _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
-    
-    # 创建稀疏和稠密特征的mask
-    sparse_mask = torch.zeros(intermediate_size, dtype=torch.bool, device=y2.device)
-    sparse_mask[sparse_indices] = True
-    dense_mask = ~sparse_mask
-    
-    # Split-GEMM计算
-    grad_weight_in2 = torch.zeros(intermediate_size, rank2, device=y2.device, dtype=y2.dtype)
-    
-    # 稀疏部分：使用2:4稀疏化的y2
-    if sparse_mask.any():
-        y2_sparse_part = y2[:, sparse_mask]
-        y2_sparse_2to4 = apply_naive_2to4_sparsity_featurewise(y2_sparse_part.t()).t()
-        grad_weight_in2[sparse_mask, :] = fake_fp8_mm(y2_sparse_2to4.T, d_intermediate_2, torch.float8_e4m3fn)
-    
-    # 稠密部分：使用原始y2
-    if dense_mask.any():
-        y2_dense_part = y2[:, dense_mask]
-        grad_weight_in2[dense_mask, :] = torch.mm(y2_dense_part.T, d_intermediate_2)
-    
-    return grad_weight_in2
+    # 必须使用fused kernel，无fallback
+    layer_id = f"split_gemm_dw2_lowrank_{id(y2)}"
+    return compute_split_gemm_dw_with_cached_sparsity(
+        y2, d_intermediate_2, layer_id, use_2to4=True
+    )  # Already in correct shape [intermediate_size, rank2]
 
 
 def compute_split_gemm_dw2(y2, dy3, y2_forward):
     """
     计算 dw2 使用 Split-GEMM 策略
     dw2 = y2.T @ dy3，但使用95%/5%特征分割
+    使用优化的fused kernel避免重复计算sparsity
     """
-    batch_seq_len, intermediate_size = y2.shape
-    hidden_size = dy3.shape[1]
-    
-    # 分析特征稀疏性
-    feature_sparsity = torch.mean((y2_forward != 0).float(), dim=0)  # [intermediate_size]
-    
-    # 选择95%的特征作为稀疏特征
-    num_sparse_features = int(0.95 * intermediate_size)
-    _, sparse_indices = torch.topk(feature_sparsity, num_sparse_features)
-    
-    # 创建稀疏和稠密特征的mask
-    sparse_mask = torch.zeros(intermediate_size, dtype=torch.bool, device=y2.device)
-    sparse_mask[sparse_indices] = True
-    dense_mask = ~sparse_mask
-    
-    # Split-GEMM计算
-    dw2 = torch.zeros(hidden_size, intermediate_size, device=y2.device, dtype=y2.dtype)
-    
-    # 稀疏部分：使用2:4稀疏化的y2
-    if sparse_mask.any():
-        y2_sparse_part = y2[:, sparse_mask]
-        y2_sparse_2to4 = apply_naive_2to4_sparsity_featurewise(y2_sparse_part.t()).t()
-        dw2[:, sparse_mask] = fake_fp8_mm(dy3.t(), y2_sparse_2to4, torch.float8_e4m3fn)
-    
-    # 稠密部分：使用原始y2
-    if dense_mask.any():
-        y2_dense_part = y2[:, dense_mask]
-        dw2[:, dense_mask] = torch.mm(dy3.t(), y2_dense_part)
-    
-    return dw2
+    # 必须使用fused kernel，无fallback
+    layer_id = f"split_gemm_dw2_{id(y2)}"
+    # For standard FFN gradient, we need dy3.T @ y2 shape
+    return compute_split_gemm_dw_with_cached_sparsity(
+        y2, dy3, layer_id, use_2to4=True, transpose_result=True
+    )
 
 
 def compute_split_gemm_dx(dy1, weight1, forward_mask):
@@ -382,14 +350,28 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
         # Step 2: 第一个低秩全连接层 (First Low-rank Linear Layer)
         # y1 = x @ weight_in1 @ weight_out1.T
         input_2d = input_permuted.view(-1, input_permuted.shape[-1])  # [batch*seq, hidden_size]
+        
+        # Compute first low-rank layer
         intermediate_1 = torch.mm(input_2d, weight_in1)  # [batch*seq, rank1]
-        y1 = torch.mm(intermediate_1, weight_out1.T)  # [batch*seq, intermediate_size]
+        
+        # Only use fused kernel if we need sparsity tracking for split-GEMM
+        if ctx.dx_direct_sparse != 3:  # dx_direct_sparse=3 means no split-GEMM
+            layer_id = f"lowrank_layer1_{id(ctx)}"
+            y1, _ = fused_gemm_forward_with_sparsity(
+                intermediate_1, weight_out1.T, layer_id,
+                activation_relu2=False, sparsity_threshold=0.95
+            )
+        else:
+            # Standard GEMM without sparsity tracking
+            y1 = torch.mm(intermediate_1, weight_out1.T)  # [batch*seq, intermediate_size]
+        
         if bias1 is not None:
             y1 = y1 + bias1
         
         # Step 3: 平方ReLU激活函数 (Squared-ReLU Activation)
-        # y2 = ReLU²(y1)
-        y2 = torch.where(y1 > 0, y1 * y1, torch.zeros_like(y1))
+        # y2 = ReLU²(y1) - Using optimized implementation
+        relu_y1 = F.relu(y1)
+        y2 = relu_y1 * relu_y1  # Faster than torch.where
         
         # Record sparsity statistics if enabled (check via config)
         if hasattr(ActivationSparse2to4LowRankFunction, '_wandb_sparsityrelu_enabled') and ActivationSparse2to4LowRankFunction._wandb_sparsityrelu_enabled:
@@ -434,9 +416,20 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
                 raise ValueError(f"Unknown sparsity method: {sparsity_method}")
             
             # y3 = sparsified(y2) @ weight_in2 @ weight_out2.T
-            # Use sparse.matmul via fake_fp8_mm for sparse matmuls
-            intermediate_2 = fake_fp8_mm(y2_sparse, weight_in2, torch.float8_e4m3fn)  # [batch*seq, rank2]
-            y3 = fake_fp8_mm(intermediate_2, weight_out2.T, torch.float8_e4m3fn)      # [batch*seq, hidden_size]
+            # Compute second low-rank layer
+            intermediate_2 = fake_fp8_mm(y2_sparse, weight_in2, torch.float8_e4m3fn)
+            
+            # Only use fused kernel if we need sparsity tracking for split-GEMM
+            if ctx.dx_direct_sparse != 3:  # dx_direct_sparse=3 means no split-GEMM
+                layer_id = f"lowrank_layer2_{id(ctx)}"
+                y3, _ = fused_gemm_forward_with_sparsity(
+                    intermediate_2, weight_out2.T, layer_id,
+                    activation_relu2=False, sparsity_threshold=0.95
+                )
+            else:
+                # Standard sparse GEMM without sparsity tracking
+                y3 = fake_fp8_mm(intermediate_2, weight_out2.T, torch.float8_e4m3fn)
+            
             if bias2 is not None:
                 y3 = y3 + bias2
             
@@ -487,7 +480,9 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
         
         # Step 3: 反向通过激活函数 (Backprop through Activation)
         # dy1 = 2 * dy2 * ReLU(y1)
-        relu_y1 = torch.where(y1 > 0, y1, torch.zeros_like(y1))
+        # Optimized gradient computation for ReLU²
+        # d/dx[ReLU²(x)] = 2*ReLU(x)
+        relu_y1 = F.relu(y1)
         dy1 = 2 * dy2 * relu_y1
         
         # Initialize gradients
@@ -743,13 +738,25 @@ class ActivationSparse2to4Function(autograd.Function):
         # Step 2: 第一个全连接层 (First Linear Layer) - Dense GEMM
         # y1 = x @ w1
         input_2d = input_permuted.view(-1, input_permuted.shape[-1])  # [batch*seq, hidden_size]
-        y1 = torch.mm(input_2d, weight1.T)  # [batch*seq, intermediate_size]
+        
+        # Only use fused kernel if we need sparsity tracking for split-GEMM
+        if ctx.dx_direct_sparse != 3:  # dx_direct_sparse=3 means no split-GEMM
+            layer_id = f"ffn_layer1_{id(ctx)}"
+            y1, _ = fused_gemm_forward_with_sparsity(
+                input_2d, weight1.T, layer_id,
+                activation_relu2=False, sparsity_threshold=0.95
+            )
+        else:
+            # Standard GEMM without sparsity tracking
+            y1 = torch.mm(input_2d, weight1.T)  # [batch*seq, intermediate_size]
+        
         if bias1 is not None:
             y1 = y1 + bias1
         
         # Step 3: 平方ReLU激活函数 (Squared-ReLU Activation)
-        # y2 = ReLU²(y1)
-        y2 = torch.where(y1 > 0, y1 * y1, torch.zeros_like(y1))
+        # y2 = ReLU²(y1) - Using optimized implementation
+        relu_y1 = F.relu(y1)
+        y2 = relu_y1 * relu_y1  # Faster than torch.where
         
         # Record sparsity statistics if enabled (check via config)
         # We need to check if wandb_sparsityrelu is enabled in the model config
@@ -848,7 +855,17 @@ class ActivationSparse2to4Function(autograd.Function):
                 raise ValueError(f"Unknown sparsity method: {sparsity_method}")
             
             # y3 = sparsified(y2) @ w2 using sparse.matmul via fake_fp8_mm
-            y3 = fake_fp8_mm(y2_sparse, weight2.T, torch.float8_e4m3fn)
+            # Only use fused kernel if we need sparsity tracking for split-GEMM
+            if ctx.dx_direct_sparse != 3:  # dx_direct_sparse=3 means no split-GEMM
+                layer_id = f"ffn_layer2_{id(ctx)}"
+                y3, _ = fused_gemm_forward_with_sparsity(
+                    y2_sparse, weight2.T, layer_id,
+                    activation_relu2=False, sparsity_threshold=0.95
+                )
+            else:
+                # Standard sparse GEMM without sparsity tracking
+                y3 = fake_fp8_mm(y2_sparse, weight2.T, torch.float8_e4m3fn)
+            
             if bias2 is not None:
                 y3 = y3 + bias2
             
@@ -900,7 +917,9 @@ class ActivationSparse2to4Function(autograd.Function):
         
         # Step 3: 反向通过激活函数 (Backprop through Activation)
         # dy1 = 2 * dy2 * ReLU(y1)
-        relu_y1 = torch.where(y1 > 0, y1, torch.zeros_like(y1))
+        # Optimized gradient computation for ReLU²
+        # d/dx[ReLU²(x)] = 2*ReLU(x)
+        relu_y1 = F.relu(y1)
         dy1 = 2 * dy2 * relu_y1
         
         # Initialize gradients
@@ -1092,7 +1111,9 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
         input_2d = input_permuted.view(-1, input_permuted.shape[-1])
         intermediate = torch.mm(input_2d, weight_in)           # [B*S, rank]
         y1 = intermediate                                      # alias for clarity
-        y2 = torch.where(y1 > 0, y1 * y1, torch.zeros_like(y1))  # ReLU²
+        # ReLU² - Using optimized implementation
+        relu_y1 = F.relu(y1)
+        y2 = relu_y1 * relu_y1
 
         # Record sparsity statistics if enabled
         if hasattr(ActivationSparse2to4LowRankFunctionSingle, '_wandb_sparsityrelu_enabled') and ActivationSparse2to4LowRankFunctionSingle._wandb_sparsityrelu_enabled:
@@ -1128,7 +1149,17 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
             ctx.is_warmup = False
 
         # Second low-rank matmul to output (use sparse.matmul via fake_fp8_mm wrapper)
-        y3 = fake_fp8_mm(y2_sparse, weight_out.T, torch.float8_e4m3fn)  # [B*S, out_features]
+        # Only use fused kernel if we need sparsity tracking for split-GEMM
+        if ctx.dx_direct_sparse != 3:  # dx_direct_sparse=3 means no split-GEMM
+            layer_id = f"lowrank_single_{id(ctx)}"
+            y3, _ = fused_gemm_forward_with_sparsity(
+                y2_sparse, weight_out.T, layer_id,
+                activation_relu2=False, sparsity_threshold=0.95
+            )
+        else:
+            # Standard sparse GEMM without sparsity tracking
+            y3 = fake_fp8_mm(y2_sparse, weight_out.T, torch.float8_e4m3fn)  # [B*S, out_features]
+        
         if bias is not None:
             y3 = y3 + bias
 
@@ -1164,7 +1195,8 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
 
         # Backprop through ReLU²: d/dx[ReLU²(x)] = 2*x if x > 0, else 0
         # Note: y1 is the value before ReLU²
-        dy1 = torch.where(y1 > 0, 2 * y1 * dy2, torch.zeros_like(dy2))
+        # Optimized gradient: d/dx[ReLU²(x)] = 2*ReLU(x)
+        dy1 = 2 * F.relu(y1) * dy2
 
         grad_input = grad_weight_in = grad_weight_out = grad_bias = None
 
