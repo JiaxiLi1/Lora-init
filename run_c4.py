@@ -118,7 +118,8 @@ class HybridSparseLinear(nn.Module):
             more_activation_relu2: bool = False,
             activation_sparse_method: str = "mvue",
             activation_dense_warmup_steps: int = 1000,
-            activation_2by4_permute: bool = True
+            activation_2by4_permute: bool = True,
+            module_name: str = None
     ):
         super().__init__()
         self.in_features = in_features
@@ -126,6 +127,7 @@ class HybridSparseLinear(nn.Module):
         self.lowrank_module = lowrank_module
         self.cola_silu = cola_silu
         self.cola_sparse_method = cola_sparse_method
+        self.module_name = module_name  # Store module name for logging
         
         # More activation ReLU2 configuration
         self.more_activation_relu2 = more_activation_relu2
@@ -258,6 +260,7 @@ class HybridSparseLinear(nn.Module):
                     getattr(self, 'dynamic_activation_steps', 10),
                     getattr(self, 'activation_calibration_samples', 100),
                     getattr(self, 'activation_2by4_permute', True),
+                    getattr(self, 'module_name', None),  # Pass module name
                 )
             else:
                 # Default CoLA mode: x @ weight_in -> SiLU -> @ weight_out.T
@@ -289,6 +292,7 @@ class HybridSparseLinear(nn.Module):
                     getattr(self, 'dynamic_activation_steps', 10),
                     getattr(self, 'activation_calibration_samples', 100),
                     getattr(self, 'activation_2by4_permute', True),
+                    getattr(self, 'module_name', None),  # Pass module name
                 )
             else:
                 # Default LoST: simple matmul
@@ -323,7 +327,8 @@ class CoLALowRankLinear(nn.Module):
                  dynamic_activation_steps: int = 10,
                  activation_calibration_samples: int = 100,
                  cola_sparse_method: str = "cola_init",
-                 original_weight=None):
+                 original_weight=None,
+                 module_name: str = None):
         super().__init__()
         # Copy all attributes from original LowRankLinear module
         self.in_dim = original_module.in_dim
@@ -332,6 +337,7 @@ class CoLALowRankLinear(nn.Module):
         self.weight_in = original_module.weight_in  # [in_dim, rank]
         self.weight_out = original_module.weight_out  # [out_dim, rank] 
         self.bias = original_module.bias
+        self.module_name = module_name  # Store the module name for logging
         
         # CoLA activation configuration
         self.more_activation_relu2 = more_activation_relu2
@@ -405,6 +411,7 @@ class CoLALowRankLinear(nn.Module):
                 self.dynamic_activation_steps,
                 self.activation_calibration_samples,
                 self.activation_2by4_permute,
+                self.module_name,  # Pass module name for logging
             )
         else:
             # Default CoLA: x @ weight_in -> SiLU -> @ weight_out.T  
@@ -1694,6 +1701,7 @@ def main(args):
                             activation_calibration_samples=args.activation_calibration_samples,
                             cola_sparse_method=args.cola_sparse_method,
                             original_weight=original_weight,
+                            module_name=name,  # Pass the full module path name
                         )
                         
                         # Replace the module in the model
@@ -1740,7 +1748,8 @@ def main(args):
                             more_activation_relu2=args.more_activation_relu2,
                             activation_sparse_method=args.activation_sparse_method,
                             activation_dense_warmup_steps=args.activation_dense_warmup_steps,
-                            activation_2by4_permute=args.permute_2by4
+                            activation_2by4_permute=args.permute_2by4,
+                            module_name=name  # Pass module name
                         )
                         
                         # Initialize the sparse mask (LoST 列稀疏 + 可选 CoLA 初始化)
@@ -2093,7 +2102,7 @@ def main(args):
                 f"Total loss = {loss.item()}, "
                 f"lr = {lr_tmp}, Time = {update_time} sec, max_memory_GB = {max_memory_GB:.2f}"
             )
-            
+
 
         # save checkpoint by save_every
         if update_step % args.save_every == 0:

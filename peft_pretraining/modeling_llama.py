@@ -1080,7 +1080,7 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
 
     @staticmethod
     @custom_fwd
-    def forward(ctx, input, weight_in, weight_out, bias=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=1, dynamic_steps=10, calibration_samples=100, enable_permute=True):
+    def forward(ctx, input, weight_in, weight_out, bias=None, sparsity_method="mvue", warmup_steps=None, dx_direct_sparse=1, dynamic_steps=10, calibration_samples=100, enable_permute=True, module_name=None):
         ctx.sparsity_method = sparsity_method
         ctx.input_shape = input.shape
         ctx.dx_direct_sparse = int(dx_direct_sparse)
@@ -1117,7 +1117,7 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
 
         # Record sparsity statistics if enabled
         if hasattr(ActivationSparse2to4LowRankFunctionSingle, '_wandb_sparsityrelu_enabled') and ActivationSparse2to4LowRankFunctionSingle._wandb_sparsityrelu_enabled:
-            ActivationSparse2to4LowRankFunctionSingle._record_activation_sparsity_static(y2)
+            ActivationSparse2to4LowRankFunctionSingle._record_activation_sparsity_static(y2, module_name)
 
         if ActivationSparse2to4LowRankFunctionSingle._training_step < ActivationSparse2to4LowRankFunctionSingle._warmup_steps:
             y2_sparse = y2
@@ -1249,8 +1249,8 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
                 grad_bias = dy3.sum(0)
 
         # Must return one gradient per forward input arg:
-        # (input, weight_in, weight_out, bias, sparsity_method, warmup_steps, dx_direct_sparse, dynamic_steps, calibration_samples, enable_permute)
-        return grad_input, grad_weight_in, grad_weight_out, grad_bias, None, None, None, None, None, None
+        # (input, weight_in, weight_out, bias, sparsity_method, warmup_steps, dx_direct_sparse, dynamic_steps, calibration_samples, enable_permute, module_name)
+        return grad_input, grad_weight_in, grad_weight_out, grad_bias, None, None, None, None, None, None, None
 
     @staticmethod
     def increment_step():
@@ -1261,7 +1261,7 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
         ActivationSparse2to4LowRankFunctionSingle._warmup_steps = steps
 
     @staticmethod
-    def _record_activation_sparsity_static(activated_tensor, layer_id=None):
+    def _record_activation_sparsity_static(activated_tensor, module_name=None):
         """
         Static method to record activation sparsity for low-rank CoLA/LoST
         Only records every 10 update steps to reduce overhead
@@ -1310,8 +1310,29 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
         total_elements = activated_tensor.numel()
         sparsity = num_zeros / total_elements if total_elements > 0 else 0.0
         
-        # Store in dict
-        ActivationSparse2to4LowRankFunctionSingle._lowrank_sparsity_stats[f"lowrank_relu2_sparsity/layer_{layer_idx}"] = sparsity
+        # Store in dict with module name if available
+        if module_name:
+            # Extract meaningful parts from module name like "model.layers.0.self_attn.q_proj"
+            parts = module_name.split('.')
+            if len(parts) >= 3:
+                # Find layer number and module type
+                layer_num = None
+                module_type = parts[-1]  # e.g., 'q_proj', 'k_proj', 'up_proj', etc.
+                for part in parts:
+                    if part.isdigit():
+                        layer_num = part
+                        break
+                if layer_num is not None:
+                    key = f"lowrank_relu2_sparsity/layer_{layer_num}.{module_type}"
+                else:
+                    key = f"lowrank_relu2_sparsity/{module_name.replace('.', '_')}"
+            else:
+                key = f"lowrank_relu2_sparsity/{module_name.replace('.', '_')}"
+        else:
+            # Fallback to index-based naming
+            key = f"lowrank_relu2_sparsity/layer_{layer_idx}"
+        
+        ActivationSparse2to4LowRankFunctionSingle._lowrank_sparsity_stats[key] = sparsity
 
     @staticmethod
     def get_lowrank_sparsity_stats():
