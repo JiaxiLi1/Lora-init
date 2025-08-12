@@ -1993,143 +1993,13 @@ def main(args):
         tokens_seen += (batch["input_ids"] != pad_idx).sum().item() * world_size
 
         loss = model(**batch, labels=labels).loss
-        
-        # 🔍 Enhanced NaN Detection and Early Stopping
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"❌ CRITICAL: NaN/Inf loss detected at step {global_step}! Loss: {loss}")
-            print(f"🛑 This indicates numerical instability. Stopping training to prevent corruption.")
-            
-            # Detailed diagnosis
-            nan_params = []
-            large_params = []
-            for name, param in model.named_parameters():
-                if torch.isnan(param).any():
-                    nan_params.append(name)
-                elif param.abs().max() > 1e6:
-                    large_params.append((name, param.abs().max().item()))
-            
-            if nan_params:
-                print(f"❌ Parameters with NaN: {nan_params[:10]}")
-            if large_params:
-                print(f"⚠️  Parameters with large values: {large_params[:5]}")
-            
-            # # Save debug checkpoint
-            # if global_rank == 0:
-            #     debug_path = os.path.join(args.save_dir, f"debug_nan_step_{global_step}")
-            #     os.makedirs(debug_path, exist_ok=True)
-            #     torch.save(model.state_dict(), os.path.join(debug_path, "model_state_with_nan.bin"))
-            #     print(f"💾 Debug checkpoint saved to {debug_path}")
-            #
-            # # Exit immediately to prevent further corruption
-            # exit(1)
 
-        # 🔍 Debug: Check loss for NaN/Inf before backward
-        if torch.isnan(loss).any() or torch.isinf(loss).any():
-            print(f"🚨 CRITICAL: NaN/Inf detected in LOSS at step {global_step}!")
-            print(f"   Loss value: {loss.item()}")
-            print(f"   Loss has NaN: {torch.isnan(loss).any()}")
-            print(f"   Loss has Inf: {torch.isinf(loss).any()}")
-            
-            # Save emergency checkpoint before crash
-            # if global_rank == 0:
-            #     emergency_path = os.path.join(args.save_dir, f"emergency_nan_loss_step_{global_step}")
-            #     os.makedirs(emergency_path, exist_ok=True)
-            #     torch.save({
-            #         'model': model.state_dict() if not isinstance(model, torch.nn.parallel.DistributedDataParallel) else model.module.state_dict(),
-            #         'step': global_step,
-            #         'loss': loss.item()
-            #     }, os.path.join(emergency_path, "emergency_state.pt"))
-            #     print(f"💾 Emergency checkpoint saved to: {emergency_path}")
-            # break
-        
-        # 🔍 Debug: Track loss trends and problems
-        if global_step % 200 == 0:  # 🔧 REDUCED: Every 200 steps instead of 50
-            current_loss = loss.item()
-            print(f"📈 Step {global_step}: Loss = {current_loss:.4f}")
-            
-            # Check for problematic loss trends
-            if hasattr(main, 'prev_loss'):
-                loss_change = current_loss - main.prev_loss
-                if abs(loss_change) > 1.0:  # 🚨 Large loss jump
-                    print(f"🚨 Large loss change: {loss_change:+.4f}")
-                elif current_loss > 20:  # 🚨 Very high loss
-                    print(f"🚨 High loss detected: {current_loss:.4f}")
-                elif current_loss < 0.1:  # 🚨 Loss too low too fast
-                    print(f"🚨 Loss dropping very fast: {current_loss:.4f}")
-            main.prev_loss = current_loss
-            
-            # 🔍 Track training health status
-            if not hasattr(main, 'mvue_skip_count'):
-                main.mvue_skip_count = 0
-                main.grad_vanish_count = 0
-                main.mvue_inf_count = 0
-                main.problem_start_step = None
-            
-            # 🔍 Report accumulated issues every 1000 steps
-            if global_step % 1000 == 0 and global_step > 0:
-                print(f"📊 Training Health Summary (Steps {global_step-1000} to {global_step}):")
-                print(f"   MVUE inf amplifications: {main.mvue_inf_count}")
-                print(f"   Gradient vanishing cases: {main.grad_vanish_count}")
-                if main.problem_start_step:
-                    print(f"   First major issue detected at step: {main.problem_start_step}")
-                
-                # Reset counters
-                main.mvue_inf_count = 0
-                main.grad_vanish_count = 0
 
         scaled_loss = loss / args.gradient_accumulation
         scaled_loss.backward()
 
         if global_step % args.gradient_accumulation != 0:
             continue
-
-        ## NOTE: The below code is only executed during the update step
-
-        # Check gradient health after backward pass
-        health_status = check_gradient_health(model, global_step)
-        
-        # Check model weights health
-        check_model_weights_health(model, global_step)
-        
-        # 🔧 NEW: Early stopping based on gradient health
-        if health_status and (health_status['suspicious'] > 0 or health_status['zero_ratio'] > 0.8):
-            print(f"🛑 EARLY STOPPING: Gradient health deteriorated beyond recovery threshold!")
-            print(f"   Suspicious params: {health_status['suspicious']}")
-            print(f"   Zero gradient ratio: {health_status['zero_ratio']*100:.1f}%")
-            print(f"   Average gradient norm: {health_status['avg_norm']:.2e}")
-            
-            # # Save emergency checkpoint
-            # if global_rank == 0:
-            #     emergency_path = os.path.join(args.save_dir, f"emergency_stop_step_{global_step}")
-            #     os.makedirs(emergency_path, exist_ok=True)
-            #     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-            #         model.module.save_pretrained(emergency_path, max_shard_size="100GB")
-            #     else:
-            #         model.save_pretrained(emergency_path, max_shard_size="100GB")
-            #     print(f"💾 Emergency checkpoint saved to {emergency_path}")
-            #
-            # # Exit gracefully
-            # break
-
-        # 🔍 Debug: Gradient clipping analysis
-        if args.grad_clipping != 0.0:
-            total_norm_before = torch.nn.utils.clip_grad_norm_(trainable_params, float('inf'))
-            torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clipping)
-            
-            if global_step % 100 == 0:
-                print(f"🔧 Gradient Clipping Analysis (Step {global_step}):")
-                print(f"   Total gradient norm before clipping: {total_norm_before:.6f}")
-                print(f"   Clipping threshold: {args.grad_clipping}")
-                if total_norm_before > args.grad_clipping:
-                    print(f"   ✂️  Gradients were clipped (ratio: {args.grad_clipping/total_norm_before:.4f})")
-                else:
-                    print(f"   ✅ No clipping needed")
-                    
-                # Track extreme gradient norms
-                if total_norm_before > 100:
-                    print(f"⚠️  Very large gradient norm detected: {total_norm_before:.2f}")
-                elif total_norm_before < 1e-6:
-                    print(f"⚠️  Very small gradient norm detected: {total_norm_before:.2e}")
 
         grad_norm = sum(
             [
@@ -2189,6 +2059,7 @@ def main(args):
         if hasattr(args, 'more_activation_relu2') and args.more_activation_relu2:
             from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunctionSingle
             ActivationSparse2to4LowRankFunctionSingle._training_step = update_step
+            ActivationSparse2to4LowRankFunctionSingle._global_update_step = update_step  # For sparsity recording control
             # Log warmup status for CoLA/LoST
             if update_step == args.activation_dense_warmup_steps:
                 logger.info(f"🔧 CoLA/LoST dense warmup completed at step {update_step}. Activation 2:4 sparsity now enabled.")
@@ -2223,23 +2094,6 @@ def main(args):
                 f"lr = {lr_tmp}, Time = {update_time} sec, max_memory_GB = {max_memory_GB:.2f}"
             )
             
-        # 🔍 Debug: Periodic health check every 100 steps
-        if update_step % 100 == 0:
-            param_health = {"healthy": 0, "nan": 0, "inf": 0, "high_norm": 0}
-            for name, param in model.named_parameters():
-                if torch.isnan(param).any():
-                    param_health["nan"] += 1
-                elif torch.isinf(param).any():
-                    param_health["inf"] += 1
-                elif torch.norm(param) > 1000:
-                    param_health["high_norm"] += 1
-                else:
-                    param_health["healthy"] += 1
-                    
-            if param_health["nan"] > 0 or param_health["inf"] > 0:
-                print(f"🚨 HEALTH CHECK @ step {update_step}: {param_health}")
-            elif update_step % 500 == 0:  # Only print healthy status every 500 steps
-                print(f"✅ HEALTH CHECK @ step {update_step}: {param_health}")
 
         # save checkpoint by save_every
         if update_step % args.save_every == 0:
@@ -2342,8 +2196,8 @@ def main(args):
                         "flip_rate/total": 0.0
                     })
 
-            # Add sparsity statistics if enabled
-            if args.wandb_sparsityrelu:
+            # Add sparsity statistics if enabled (every 10 steps to reduce logging overhead)
+            if args.wandb_sparsityrelu and update_step % 10 == 0:
                 sparsity_stats = LlamaMLP.get_sparsity_stats()
                 if sparsity_stats:
                     wandb_dict.update(sparsity_stats)

@@ -1264,27 +1264,40 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
     def _record_activation_sparsity_static(activated_tensor, layer_id=None):
         """
         Static method to record activation sparsity for low-rank CoLA/LoST
+        Only records every 10 update steps to reduce overhead
         """
         try:
-            # Get current training step from the class variable set by main training loop
-            current_step = getattr(ActivationSparse2to4LowRankFunctionSingle, '_global_training_step', 0)
+            # Get current update step (not global step) from the class variable
+            current_step = getattr(ActivationSparse2to4LowRankFunctionSingle, '_global_update_step', 0)
         except Exception as e:
             current_step = 0
+        
+        # Only record every 10 update steps
+        if current_step % 10 != 0:
+            return
         
         # Initialize recording state for this step if needed
         if not hasattr(ActivationSparse2to4LowRankFunctionSingle, '_last_recorded_step'):
             ActivationSparse2to4LowRankFunctionSingle._last_recorded_step = -1
             ActivationSparse2to4LowRankFunctionSingle._current_step_layer_count = 0
+            ActivationSparse2to4LowRankFunctionSingle._forward_pass_count = 0
         
-        # Reset layer counter for new step
+        # Reset counters for new step
         if current_step != ActivationSparse2to4LowRankFunctionSingle._last_recorded_step:
             ActivationSparse2to4LowRankFunctionSingle._last_recorded_step = current_step
             ActivationSparse2to4LowRankFunctionSingle._current_step_layer_count = 0
+            ActivationSparse2to4LowRankFunctionSingle._forward_pass_count = 0
             # Initialize sparsity accumulator for this step
             if not hasattr(ActivationSparse2to4LowRankFunctionSingle, '_lowrank_sparsity_stats'):
                 ActivationSparse2to4LowRankFunctionSingle._lowrank_sparsity_stats = {}
         
-        # Increment layer counter
+        # Only record on the first forward pass of each update step (to avoid gradient accumulation duplicates)
+        # Each model has 72 low-rank modules (12 layers * 6 modules per layer)
+        if ActivationSparse2to4LowRankFunctionSingle._current_step_layer_count >= 72:
+            # We've already recorded all layers in this step
+            return
+        
+        # Get layer index
         layer_idx = ActivationSparse2to4LowRankFunctionSingle._current_step_layer_count
         ActivationSparse2to4LowRankFunctionSingle._current_step_layer_count += 1
         
