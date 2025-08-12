@@ -360,11 +360,16 @@ class CoLALowRankLinear(nn.Module):
                 S_k = S[:rank]
                 Vh_k = Vh[:rank, :]
                 
-                # Initialize weight_in as U_k * sqrt(S_k) (transposed to match expected shape)
-                # Initialize weight_out as sqrt(S_k) * Vh_k (transposed to match expected shape)
+                # Initialize weight_in and weight_out from SVD decomposition
+                # original_weight: [out_dim, in_dim]
+                # weight_in: [in_dim, rank], weight_out: [out_dim, rank]
+                # SVD: original_weight = U @ S @ Vh where U:[out_dim, k], S:[k], Vh:[k, in_dim]
                 S_sqrt = torch.sqrt(S_k)
-                self.weight_in.data.copy_((U_k * S_sqrt).to(self.weight_in.dtype))
-                self.weight_out.data.copy_((S_sqrt.unsqueeze(1) * Vh_k).T.to(self.weight_out.dtype))
+                
+                # weight_in should be Vh.T * sqrt(S) -> [in_dim, rank]
+                self.weight_in.data.copy_((Vh_k.T * S_sqrt).to(self.weight_in.dtype))
+                # weight_out should be U * sqrt(S) -> [out_dim, rank]  
+                self.weight_out.data.copy_((U_k * S_sqrt).to(self.weight_out.dtype))
             elif cola_sparse_method == "cola_init":
                 # Original CoLA-style initialization
                 target_sdv = (self.in_dim + self.out_dim) ** (-0.5)
