@@ -2244,7 +2244,7 @@ def main(args):
         update_time = time.time()
 
         # Check gradient health
-        health_status = check_gradient_health(model, global_step)
+        # health_status = check_gradient_health(model, global_step)
 
         # evaluation
         if update_step % args.eval_every == 0:
