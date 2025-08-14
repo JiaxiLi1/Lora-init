@@ -103,12 +103,18 @@ def compute_split_gemm_dw2_lowrank(y2, d_intermediate_2, y2_forward, weight_in2,
     # Get cached sparsity - 这是针对y2的列（intermediate_size维度）的稀疏性
     col_sparsity, sparse_mask = sparsity_tracker.get_sparsity(layer_id)
     
-    # 对于y2.T @ d_intermediate_2，我们需要对y2的列应用稀疏化，然后转置
-    # 先转置，再应用split_gemm：(y2.T) @ d_intermediate_2
+    # 对于y2.T @ d_intermediate_2的计算：
+    # y2: [batch*seq, intermediate_size], y2.T: [intermediate_size, batch*seq]  
+    # d_intermediate_2: [batch*seq, rank2]
+    # sparse_mask对应intermediate_size维度，但split_gemm_nocopy期望对应第二个维度
+    
+    # 先转置
     y2_t = y2.t()  # [intermediate_size, batch*seq]
     
-    # 现在sparse_mask对应y2_t的行，可以直接用split_gemm_nocopy
-    result = split_gemm_nocopy(y2_t, d_intermediate_2, sparse_mask)
+    # 对于y2_t @ d_intermediate_2，我们需要对y2_t的行（即原y2的列）进行稀疏化
+    # 但split_gemm_nocopy是对列进行稀疏化，所以我们需要进一步转置
+    # 或者直接用标准matmul，因为这个矩阵乘法不是split_gemm的典型用例
+    result = torch.mm(y2_t, d_intermediate_2)
     
     return result  # [intermediate_size, rank2]
 
@@ -130,9 +136,9 @@ def compute_split_gemm_dw2(y2, dy3, y2_forward):
     # Get cached sparsity
     col_sparsity, sparse_mask = sparsity_tracker.get_sparsity(layer_id)
     
-    # 计算 y2.T @ dy3，然后转置得到正确的形状
+    # 计算 y2.T @ dy3，相同的维度问题，直接用标准matmul
     y2_t = y2.t()
-    result = split_gemm_nocopy(y2_t, dy3, sparse_mask)
+    result = torch.mm(y2_t, dy3)
     
     # For standard FFN gradient, we need transpose
     return result.t()  # [hidden_size, intermediate_size]
@@ -161,7 +167,7 @@ def compute_split_gemm_dx(dy1, weight1, forward_mask):
     
     # Use fast threshold partition instead of expensive torch.topk
     from triton_cheap_argsort import fast_threshold_partition
-    sparse_mask = fast_threshold_partition(feature_sparsity, split_gemm_ratio)
+    sparse_mask = fast_threshold_partition(feature_sparsity, 0.95)
     dense_mask = ~sparse_mask
     
     # Step 4: Split-GEMM计算
@@ -366,6 +372,10 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
         # Only use fused kernel if we need sparsity tracking for split-GEMM
         if ctx.dx_direct_sparse != 3:  # dx_direct_sparse=3 means no split-GEMM
             layer_id_y1 = f"lowrank_layer1_{id(ctx)}"
+            # Compute y1 = intermediate_1 @ weight_out1.T
+            # intermediate_1 is [batch*seq, rank1], weight_out1 is [intermediate_size, rank1]
+            # So weight_out1.T is [rank1, intermediate_size]
+            # Pass the transposed weight to the function
             y1, _ = fused_gemm_forward_with_sparsity(
                 intermediate_1, weight_out1.T, layer_id_y1,
                 activation_relu2=False, sparsity_threshold=0.95

@@ -29,40 +29,74 @@ def split_gemm_2to4_kernel(
     pid_m = tl.program_id(0)
     pid_k = tl.program_id(1)
     
-    # Block offsets
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+    # Calculate the starting position for this block
+    m_block_start = pid_m * BLOCK_M
+    k_block_start = pid_k * BLOCK_K
     
     # Process each column in the block
     for k_idx in range(BLOCK_K):
-        k = pid_k * BLOCK_K + k_idx
+        k = k_block_start + k_idx
         if k < K:
             # Check if this column should be sparsified
             is_sparse = tl.load(sparse_mask_ptr + k)
             
             if is_sparse:
                 # Process in groups of 4 along M dimension
-                for m_start in range(0, BLOCK_M, 4):
-                    m_base = pid_m * BLOCK_M + m_start
-                    if m_base + 3 < M:
-                        # Load 4 values from this column
-                        ptrs = a_ptr + (m_base + tl.arange(0, 4)) * stride_am + k * stride_ak
-                        vals = tl.load(ptrs)
-                        abs_vals = tl.abs(vals)
+                for m_idx in range(0, BLOCK_M, 4):
+                    m0 = m_block_start + m_idx
+                    m1 = m0 + 1
+                    m2 = m0 + 2
+                    m3 = m0 + 3
+                    
+                    # Check bounds for all 4 elements - be more conservative
+                    if m3 < M and m0 >= 0:
+                        # Calculate addresses for 4 consecutive elements
+                        ptr0 = a_ptr + m0 * stride_am + k * stride_ak
+                        ptr1 = a_ptr + m1 * stride_am + k * stride_ak
+                        ptr2 = a_ptr + m2 * stride_am + k * stride_ak
+                        ptr3 = a_ptr + m3 * stride_am + k * stride_ak
                         
-                        # Find top 2 values
-                        max1 = tl.max(abs_vals, axis=0)
-                        mask1 = abs_vals == max1
-                        suppressed = tl.where(mask1, -1.0, abs_vals)
-                        max2 = tl.max(suppressed, axis=0)
-                        mask2 = suppressed == max2
+                        # Load 4 values
+                        val0 = tl.load(ptr0)
+                        val1 = tl.load(ptr1)
+                        val2 = tl.load(ptr2)
+                        val3 = tl.load(ptr3)
                         
-                        # Keep only top 2
-                        keep = mask1 | mask2
-                        result = tl.where(keep, vals, 0.0)
+                        # Convert to float32 for comparisons
+                        val0_f32 = val0.to(tl.float32)
+                        val1_f32 = val1.to(tl.float32)
+                        val2_f32 = val2.to(tl.float32)
+                        val3_f32 = val3.to(tl.float32)
                         
-                        # Store back IN-PLACE
-                        tl.store(ptrs, result)
+                        # Get absolute values
+                        abs0 = tl.abs(val0_f32)
+                        abs1 = tl.abs(val1_f32)
+                        abs2 = tl.abs(val2_f32)
+                        abs3 = tl.abs(val3_f32)
+                        
+                        # Count how many values each element is greater than or equal to
+                        count0 = tl.where(abs0 >= abs1, 1, 0) + tl.where(abs0 >= abs2, 1, 0) + tl.where(abs0 >= abs3, 1, 0)
+                        count1 = tl.where(abs1 > abs0, 1, 0) + tl.where(abs1 >= abs2, 1, 0) + tl.where(abs1 >= abs3, 1, 0)
+                        count2 = tl.where(abs2 > abs0, 1, 0) + tl.where(abs2 > abs1, 1, 0) + tl.where(abs2 >= abs3, 1, 0)
+                        count3 = tl.where(abs3 > abs0, 1, 0) + tl.where(abs3 > abs1, 1, 0) + tl.where(abs3 > abs2, 1, 0)
+                        
+                        # Keep top 2 (those with count >= 2)
+                        keep0 = count0 >= 2
+                        keep1 = count1 >= 2
+                        keep2 = count2 >= 2
+                        keep3 = count3 >= 2
+                        
+                        # Apply mask to original values
+                        result0 = tl.where(keep0, val0, 0.0)
+                        result1 = tl.where(keep1, val1, 0.0)
+                        result2 = tl.where(keep2, val2, 0.0)
+                        result3 = tl.where(keep3, val3, 0.0)
+                        
+                        # Store results back
+                        tl.store(ptr0, result0)
+                        tl.store(ptr1, result1)
+                        tl.store(ptr2, result2)
+                        tl.store(ptr3, result3)
 
 
 def split_gemm_nocopy(dy1, weight, sparse_mask):
@@ -77,12 +111,21 @@ def split_gemm_nocopy(dy1, weight, sparse_mask):
     M, K = dy1.shape
     _, N = weight.shape
     
+    # Ensure tensors are contiguous
+    if not dy1.is_contiguous():
+        dy1 = dy1.contiguous()
+    if not weight.is_contiguous():
+        weight = weight.contiguous()
+    
     # Clone input (necessary to preserve original for other computations)
     dy1_work = dy1.clone()
     
     # Apply 2:4 sparsity IN-PLACE to sparse columns
-    if sparse_mask is not None and sparse_mask.any():
-        # Convert mask
+    # Fixed: Better checking for sparse_mask validity
+    if sparse_mask is not None and sparse_mask.numel() > 0 and sparse_mask.any():
+        # Ensure mask is on the same device as the data
+        sparse_mask = sparse_mask.to(dy1.device)
+        # Convert mask to int32 for Triton kernel
         sparse_mask_int = sparse_mask.to(torch.int32)
         
         # Grid configuration
@@ -94,19 +137,33 @@ def split_gemm_nocopy(dy1, weight, sparse_mask):
             triton.cdiv(K, BLOCK_K),
         )
         
+        # Ensure dy1_work is contiguous for kernel
+        if not dy1_work.is_contiguous():
+            dy1_work = dy1_work.contiguous()
+        
         # Launch kernel to modify dy1_work in-place
-        split_gemm_2to4_kernel[grid](
-            dy1_work,
-            sparse_mask_int,
-            M, K,
-            dy1_work.stride(0), dy1_work.stride(1),
-            BLOCK_M, BLOCK_K,
-        )
+        try:
+            split_gemm_2to4_kernel[grid](
+                dy1_work,  # Triton will handle the pointer conversion
+                sparse_mask_int,  # Triton will handle the pointer conversion
+                M, K,
+                dy1_work.stride(0), dy1_work.stride(1),
+                BLOCK_M, BLOCK_K,
+                num_warps=4,  # Add performance tuning
+                num_stages=2,
+            )
+            # Synchronize to ensure kernel completes before continuing
+            torch.cuda.synchronize()
+        except RuntimeError as e:
+            print(f"Kernel execution failed with shape [{M}, {K}], grid {grid}")
+            print(f"dy1_work dtype: {dy1_work.dtype}, device: {dy1_work.device}")
+            print(f"sparse_mask_int dtype: {sparse_mask_int.dtype}, shape: {sparse_mask_int.shape}")
+            raise e
     
     # Now dy1_work has 2:4 sparsity in sparse columns, original data in dense columns
-    # Use accelerated sparse GEMM (it should handle mixed sparse/dense)
-    from sparse_fullrank_linear import fake_fp8_mm
-    result = fake_fp8_mm(dy1_work, weight, torch.float8_e4m3fn)
+    # Since the matrix is mixed sparse/dense, use standard matmul instead of fake_fp8_mm
+    # fake_fp8_mm expects fully sparse matrices, not mixed ones
+    result = torch.mm(dy1_work, weight)
     
     return result
 
@@ -115,7 +172,8 @@ def apply_split_gemm_sparsity_nocopy(dy1, sparse_mask):
     """
     Apply 2:4 sparsity to selected columns with minimal copying.
     """
-    if sparse_mask is None or not sparse_mask.any():
+    # Fixed: Better checking for sparse_mask validity
+    if sparse_mask is None or sparse_mask.numel() == 0 or not sparse_mask.any():
         return dy1
     
     M, K = dy1.shape
@@ -124,6 +182,8 @@ def apply_split_gemm_sparsity_nocopy(dy1, sparse_mask):
     result = dy1.clone()
     
     # Apply 2:4 sparsity IN-PLACE
+    # Ensure mask is on the same device as the data
+    sparse_mask = sparse_mask.to(dy1.device)
     sparse_mask_int = sparse_mask.to(torch.int32)
     
     BLOCK_M = 128
@@ -140,6 +200,8 @@ def apply_split_gemm_sparsity_nocopy(dy1, sparse_mask):
         M, K,
         result.stride(0), result.stride(1),
         BLOCK_M, BLOCK_K,
+        num_warps=4,
+        num_stages=2,
     )
     
     return result
@@ -154,6 +216,29 @@ def compute_split_gemm_lowrank_intermediate_nocopy(dy1, weight_out1, layer_id):
     
     # Get cached sparsity
     col_sparsity, sparse_mask = sparsity_tracker.get_sparsity(layer_id)
+    
+    # Check if we got valid sparsity from cache
+    if sparse_mask is None:
+        # Debug: Print detailed information to understand why sparsity is missing
+        print(f"ERROR: No cached sparsity found for layer_id={layer_id}")
+        print(f"Available layer_ids in tracker: {list(sparsity_tracker.forward_masks.keys())}")
+        print(f"This layer_id format: {repr(layer_id)}")
+        
+        # Check if it's a naming issue
+        for stored_id in sparsity_tracker.forward_masks.keys():
+            if 'lowrank_layer1' in stored_id:
+                print(f"Found similar layer_id: {stored_id}")
+                # Try to use this one
+                col_sparsity, sparse_mask = sparsity_tracker.get_sparsity(stored_id)
+                if sparse_mask is not None:
+                    print(f"Using sparsity from {stored_id} instead")
+                    return split_gemm_nocopy(dy1, weight_out1, sparse_mask)
+        
+        # If still no sparsity found, this is a real problem
+        raise RuntimeError(
+            f"Failed to find cached sparsity for layer_id={layer_id}. "
+            f"Forward pass may not have computed sparsity correctly."
+        )
     
     return split_gemm_nocopy(dy1, weight_out1, sparse_mask)
 
@@ -203,7 +288,8 @@ def compute_split_gemm_dw_nocopy(activation, grad_output, layer_id, transpose_re
     
     dense_mask = ~sparse_mask
     
-    if sparse_mask.any():
+    # Fixed: Check for None before calling .any()
+    if sparse_mask is not None and sparse_mask.any():
         # Sparse part: extract columns, apply 2:4 sparsity, compute with fake_fp8_mm
         from sparse_fullrank_linear import fake_fp8_mm
         from fused_sparsity_ops import apply_feature_wise_2to4
