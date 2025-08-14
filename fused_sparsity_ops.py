@@ -80,17 +80,12 @@ def fused_gemm_forward_with_sparsity(
     )
     y_sparse = y if compute_2to4 else None  # TODO: implement actual 2:4 sparsification
     
-    # Determine sparse/dense split based on sparsity
-    num_features = col_sparsity.shape[0]
-    num_sparse = int(sparsity_threshold * num_features)
+    # Determine sparse/dense split based on sparsity using cheap partition
+    # Import the fast partition method
+    from triton_cheap_argsort import fast_threshold_partition
     
-    # Get indices of most sparse columns
-    if num_sparse > 0:
-        sparse_values, sparse_indices = torch.topk(col_sparsity, num_sparse)
-        sparse_mask = torch.zeros(num_features, dtype=torch.bool, device=x.device)
-        sparse_mask[sparse_indices] = True
-    else:
-        sparse_mask = torch.zeros(num_features, dtype=torch.bool, device=x.device)
+    # Use fast threshold partition instead of expensive torch.topk
+    sparse_mask = fast_threshold_partition(col_sparsity, sparsity_threshold)
     
     # Store sparsity info for backward pass
     sparsity_tracker.store_sparsity(layer_id, col_sparsity, sparse_mask)
@@ -126,11 +121,7 @@ def compute_split_gemm_dw_with_cached_sparsity(
         Weight gradient in appropriate shape
     """
     col_sparsity, sparse_mask = sparsity_tracker.get_sparsity(layer_id)
-    
-    if sparse_mask is None:
-        # Compute without cached sparsity
-        result = torch.mm(activation.T, grad_output)
-        return result.T if transpose_result else result
+    assert sparse_mask is not None, f"No cached sparsity found for layer_id: {layer_id}. Forward pass must compute sparsity first."
     
     # Get dimensions
     batch_size, in_features = activation.shape
@@ -149,11 +140,12 @@ def compute_split_gemm_dw_with_cached_sparsity(
         # Sparse part with 2:4 pattern
         activation_sparse = activation[:, sparse_mask]
         activation_sparse_2to4 = apply_feature_wise_2to4(activation_sparse)
-        grad_weight[sparse_mask, :] = fake_fp8_mm(
+        result = fake_fp8_mm(
             activation_sparse_2to4.T, 
             grad_output, 
             torch.float8_e4m3fn
         )
+        grad_weight[sparse_mask, :] = result.to(grad_weight.dtype)
     
     # Dense part
     if dense_mask.any():
