@@ -900,132 +900,6 @@ def measure_inference_speed(model, dataloader, tokenizer, device, num_batches=10
         "batches_processed": num_batches
     }
 
-def check_gradient_health(model, step):
-    """Enhanced gradient health check with early warning system"""
-    if step % 500 != 0:  # 🔧 REDUCED: Every 500 steps instead of 100
-        return None
-        
-    print(f"\n🩺 Gradient Health Check at Step {step}")
-    print("=" * 60)
-    
-    total_params = 0
-    zero_grad_params = 0
-    small_grad_params = 0
-    large_grad_params = 0
-    nan_grad_params = 0
-    inf_grad_params = 0
-    gradient_norms = []
-    suspicious_params = []
-    param_details = []
-    
-    for name, param in model.named_parameters():
-        if param.grad is not None:
-            grad_norm = torch.norm(param.grad).item()
-            grad_max = torch.max(torch.abs(param.grad)).item()
-            grad_min = torch.min(torch.abs(param.grad)).item()
-            
-            gradient_norms.append(grad_norm)
-            total_params += 1
-            
-            # Check for suspicious gradients
-            has_nan = torch.isnan(param.grad).any()
-            has_inf = torch.isinf(param.grad).any()
-            
-            if has_nan:
-                nan_grad_params += 1
-                suspicious_params.append(f"NaN: {name}")
-                
-            if has_inf:
-                inf_grad_params += 1
-                suspicious_params.append(f"Inf: {name}")
-                
-            if grad_norm == 0:
-                zero_grad_params += 1
-                suspicious_params.append(f"Zero: {name}")
-            elif grad_norm < 1e-8:
-                small_grad_params += 1
-                suspicious_params.append(f"Tiny: {name} (norm={grad_norm:.2e})")
-            elif grad_norm > 1e3:
-                large_grad_params += 1
-                suspicious_params.append(f"Large: {name} (norm={grad_norm:.2e})")
-            
-            # Store detailed info for key parameters
-            if any(key in name for key in ['weight_in', 'weight_out', 'q_proj', 'k_proj', 'v_proj']):
-                param_details.append({
-                    'name': name,
-                    'norm': grad_norm,
-                    'max': grad_max,
-                    'min': grad_min,
-                    'shape': list(param.grad.shape),
-                    'has_nan': has_nan,
-                    'has_inf': has_inf
-                })
-    
-    # Calculate statistics
-    if gradient_norms:
-        avg_norm = sum(gradient_norms) / len(gradient_norms)
-        max_norm = max(gradient_norms)
-        min_norm = min(gradient_norms)
-        zero_ratio = zero_grad_params / total_params
-        small_ratio = small_grad_params / total_params
-        large_ratio = large_grad_params / total_params
-    else:
-        avg_norm = max_norm = min_norm = 0
-        zero_ratio = small_ratio = large_ratio = 0
-    
-    # Print summary
-    print(f"📊 Gradient Statistics:")
-    print(f"   Total parameters with gradients: {total_params}")
-    print(f"   Average gradient norm: {avg_norm:.2e}")
-    print(f"   Max gradient norm: {max_norm:.2e}")
-    print(f"   Min gradient norm: {min_norm:.2e}")
-    print(f"   Zero gradients: {zero_grad_params} ({zero_ratio*100:.1f}%)")
-    print(f"   Small gradients (<1e-8): {small_grad_params} ({small_ratio*100:.1f}%)")
-    print(f"   Large gradients (>1e3): {large_grad_params} ({large_ratio*100:.1f}%)")
-    print(f"   NaN gradients: {nan_grad_params}")
-    print(f"   Inf gradients: {inf_grad_params}")
-    
-    # Print detailed info for key parameters
-    if param_details:
-        print(f"\n🔍 Key Parameter Details:")
-        for detail in param_details[:10]:  # Show top 10
-            print(f"   {detail['name'][:50]:50s} | norm: {detail['norm']:.2e} | max: {detail['max']:.2e} | shape: {detail['shape']}")
-            if detail['has_nan'] or detail['has_inf']:
-                print(f"      ⚠️  Contains NaN: {detail['has_nan']}, Inf: {detail['has_inf']}")
-    
-    # Print suspicious parameters
-    if suspicious_params:
-        print(f"\n⚠️  Suspicious Parameters ({len(suspicious_params)}):")
-        for param_info in suspicious_params[:15]:  # Show top 15
-            print(f"   {param_info}")
-        if len(suspicious_params) > 15:
-            print(f"   ... and {len(suspicious_params) - 15} more")
-    
-    # Health status
-    health_status = {
-        'total_params': total_params,
-        'avg_norm': avg_norm,
-        'max_norm': max_norm,
-        'zero_ratio': zero_ratio,
-        'suspicious': nan_grad_params + inf_grad_params,
-        'large_gradients': large_grad_params
-    }
-    
-    # Determine overall health
-    if nan_grad_params > 0 or inf_grad_params > 0:
-        health_color = "🔴"
-        health_desc = "CRITICAL"
-    elif zero_ratio > 0.5 or large_grad_params > 5:
-        health_color = "🟡"
-        health_desc = "WARNING"
-    else:
-        health_color = "🟢"
-        health_desc = "HEALTHY"
-    
-    print(f"\n{health_color} Overall Gradient Health: {health_desc}")
-    print("=" * 60)
-    
-    return health_status
 
 def get_weight_sparsity_stats(model):
     """
@@ -1114,39 +988,6 @@ def calculate_sparsity(weight_tensor):
     return zero_elements / total_elements if total_elements > 0 else 0.0
 
 
-def check_model_weights_health(model, step):
-    """Check model weights for NaN/Inf issues"""
-    if step % 200 != 0:
-        return
-        
-    print(f"\n🔧 Model Weights Health Check at Step {step}")
-    
-    nan_weights = 0
-    inf_weights = 0
-    zero_weights = 0
-    total_weight_params = 0
-    
-    for name, param in model.named_parameters():
-        if 'weight' in name:
-            total_weight_params += 1
-            
-            if torch.isnan(param.data).any():
-                nan_weights += 1
-                print(f"🚨 NaN in weight: {name}")
-                
-            if torch.isinf(param.data).any():
-                inf_weights += 1
-                print(f"🚨 Inf in weight: {name}")
-                
-            weight_norm = torch.norm(param.data).item()
-            if weight_norm == 0:
-                zero_weights += 1
-                print(f"⚠️  Zero weight: {name}")
-    
-    if nan_weights == 0 and inf_weights == 0 and zero_weights == 0:
-        print("✅ All weights are healthy")
-    else:
-        print(f"⚠️  Weight issues: {nan_weights} NaN, {inf_weights} Inf, {zero_weights} Zero out of {total_weight_params} total")
 
 def main(args):
     Warning(f"\nSave_ckpt = {args.save_ckpt}, Save_dir = {args.save_dir}.\n")
@@ -2002,6 +1843,9 @@ def main(args):
         tokens_seen += (batch["input_ids"] != pad_idx).sum().item() * world_size
 
         loss = model(**batch, labels=labels).loss
+        if torch.isnan(loss):
+            print("Loss is NaN, stopping training.")
+            exit()  # 或者 break，看你是在函数里还是主循环里
 
 
         scaled_loss = loss / args.gradient_accumulation
@@ -2244,7 +2088,7 @@ def main(args):
         update_time = time.time()
 
         # Check gradient health
-        # health_status = check_gradient_health(model, global_step)
+
 
         # evaluation
         if update_step % args.eval_every == 0:
@@ -2286,6 +2130,9 @@ def main(args):
 
             logger.info(f"Eval loss at step {update_step}: {total_loss}")
 
+    if torch.isnan(loss):
+        print("Loss is NaN, stopping training.")
+        exit()  # 或者 break，看你是在函数里还是主循环里
     # ##############################
     # END of training loop
     # ##############################
