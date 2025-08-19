@@ -549,9 +549,11 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
                     grad_input_2d = torch.mm(d_intermediate_1.to(weight_in1.dtype), weight_in1.T)
                 else:
                     # Use cached sparsity from forward pass for y1
-
-                    d_intermediate_1 = compute_split_gemm_lowrank_intermediate(dy1, weight_out1, ctx.layer_id_y1)
+                    dy1_naive_sparse = apply_naive_2to4_sparsity(dy1)
+                    d_intermediate_1 = fake_fp8_mm(dy1_naive_sparse, weight_out1, torch.float8_e4m3fn)
                     grad_input_2d = torch.mm(d_intermediate_1.to(weight_in1.dtype), weight_in1.T)
+                    # d_intermediate_1 = compute_split_gemm_lowrank_intermediate(dy1, weight_out1, ctx.layer_id_y1)
+                    # grad_input_2d = torch.mm(d_intermediate_1.to(weight_in1.dtype), weight_in1.T)
                 
                 grad_input_permuted = grad_input_2d.view(batch_size, seq_len, hidden_size)
                 if inv_perm is not None:

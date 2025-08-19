@@ -1842,10 +1842,140 @@ def main(args):
         labels[labels == pad_idx] = -100
         tokens_seen += (batch["input_ids"] != pad_idx).sum().item() * world_size
 
+        # 先尝试正常forward
         loss = model(**batch, labels=labels).loss
+        
+        # 如果检测到NaN，重新运行一次带详细追踪的forward
         if torch.isnan(loss):
-            print("Loss is NaN, stopping training.")
-            exit()  # 或者 break，看你是在函数里还是主循环里
+            print("=" * 80)
+            print(f"[CRITICAL] Loss is NaN detected at step {global_step}, update_step {update_step}")
+            print("=" * 80)
+            
+            # 立即重新运行一次forward并逐层追踪
+            print("\n[Starting detailed layer-by-layer NaN tracking...]")
+            
+            # 注册hooks来追踪每层
+            hooks = []
+            nan_found_at = []
+            
+            def check_tensor_for_nan(tensor, name=""):
+                if tensor is None:
+                    return False, "None"
+                if isinstance(tensor, tuple):
+                    tensor = tensor[0]
+                has_nan = torch.isnan(tensor).any().item()
+                has_inf = torch.isinf(tensor).any().item()
+                stats = {
+                    "has_nan": has_nan,
+                    "has_inf": has_inf,
+                    "min": tensor.min().item() if not has_nan else "NaN",
+                    "max": tensor.max().item() if not has_nan else "NaN",
+                    "mean": tensor.mean().item() if not has_nan else "NaN",
+                    "shape": list(tensor.shape)
+                }
+                return has_nan or has_inf, stats
+            
+            def forward_hook(module, input, output, module_name):
+                # 检查输入
+                for i, inp in enumerate(input):
+                    if torch.is_tensor(inp):
+                        has_issue, stats = check_tensor_for_nan(inp, f"input_{i}")
+                        if has_issue:
+                            nan_found_at.append({
+                                "layer": module_name,
+                                "type": "input",
+                                "index": i,
+                                "stats": stats
+                            })
+                            print(f"\n❌ NaN/Inf found in {module_name} input[{i}]:")
+                            print(f"   Shape: {stats['shape']}")
+                            print(f"   Has NaN: {stats['has_nan']}, Has Inf: {stats['has_inf']}")
+                            if not stats['has_nan']:
+                                print(f"   Min: {stats['min']:.6f}, Max: {stats['max']:.6f}, Mean: {stats['mean']:.6f}")
+                
+                # 检查输出
+                has_issue, stats = check_tensor_for_nan(output, "output")
+                if has_issue:
+                    nan_found_at.append({
+                        "layer": module_name,
+                        "type": "output",
+                        "stats": stats
+                    })
+                    print(f"\n❌ NaN/Inf found in {module_name} output:")
+                    print(f"   Shape: {stats['shape']}")
+                    print(f"   Has NaN: {stats['has_nan']}, Has Inf: {stats['has_inf']}")
+                    if not stats['has_nan']:
+                        print(f"   Min: {stats['min']:.6f}, Max: {stats['max']:.6f}, Mean: {stats['mean']:.6f}")
+                    
+                    # 如果是LowRankLinear，检查A和B矩阵
+                    if hasattr(module, 'A') and hasattr(module, 'B'):
+                        a_has_issue, a_stats = check_tensor_for_nan(module.A, "A")
+                        b_has_issue, b_stats = check_tensor_for_nan(module.B, "B")
+                        if a_has_issue:
+                            print(f"   A matrix has NaN/Inf! Shape: {a_stats['shape']}")
+                        if b_has_issue:
+                            print(f"   B matrix has NaN/Inf! Shape: {b_stats['shape']}")
+                    
+                    # 如果是activation 2:4相关层，输出更多信息
+                    if "mlp" in module_name.lower() and args.activation_2by4:
+                        print(f"   [Activation 2:4 active] dx_direct_sparse={args.dx_direct_sparse}")
+                        if hasattr(module, 'scale_factor'):
+                            print(f"   Scale factor: {module.scale_factor}")
+            
+            # 注册hooks到所有层
+            for name, module in model.named_modules():
+                if len(list(module.children())) == 0:  # 只在叶子节点注册
+                    hook = module.register_forward_hook(
+                        lambda m, i, o, n=name: forward_hook(m, i, o, n)
+                    )
+                    hooks.append(hook)
+            
+            # 重新运行forward
+            print("\nRe-running forward pass with detailed tracking...")
+            try:
+                with torch.no_grad():
+                    _ = model(**batch, labels=labels)
+            except Exception as e:
+                print(f"\nException during re-run: {e}")
+            
+            # 移除hooks
+            for hook in hooks:
+                hook.remove()
+            
+            # 总结NaN发生位置
+            if nan_found_at:
+                print("\n" + "=" * 80)
+                print("[NaN/Inf First Occurrence Summary]")
+                first_nan = nan_found_at[0]
+                print(f"First NaN/Inf detected at: {first_nan['layer']}")
+                print(f"Type: {first_nan['type']}")
+                print(f"Stats: {first_nan['stats']}")
+                
+                if len(nan_found_at) > 1:
+                    print(f"\nTotal {len(nan_found_at)} NaN/Inf occurrences found")
+                    print("Propagation path:")
+                    for i, occurrence in enumerate(nan_found_at[:5]):  # 只显示前5个
+                        print(f"  {i+1}. {occurrence['layer']} ({occurrence['type']})")
+            
+            # 特别检查split_gemm相关
+            if args.activation_2by4 and args.dx_direct_sparse == 1:
+                print("\n[Split GEMM Specific Checks]")
+                print("  Split GEMM is active (95% sparse + 5% dense)")
+                try:
+                    from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunctionSingle
+                    if hasattr(ActivationSparse2to4LowRankFunctionSingle, '_debug_info'):
+                        debug_info = ActivationSparse2to4LowRankFunctionSingle._debug_info
+                        if debug_info:
+                            print(f"  Last operation debug info:")
+                            for key, val in debug_info.items():
+                                print(f"    {key}: {val}")
+                except:
+                    pass
+            
+            print("\n" + "=" * 80)
+            print("Stopping training due to NaN loss.")
+            print("=" * 80)
+            exit()
 
 
         scaled_loss = loss / args.gradient_accumulation
@@ -2131,7 +2261,11 @@ def main(args):
             logger.info(f"Eval loss at step {update_step}: {total_loss}")
 
     if torch.isnan(loss):
-        print("Loss is NaN, stopping training.")
+        print("=" * 80)
+        print(f"[CRITICAL] Loss is NaN detected at end of training loop")
+        print(f"Final step: {global_step}, update_step: {update_step}")
+        print("=" * 80)
+        print("Stopping training due to NaN loss.")
         exit()  # 或者 break，看你是在函数里还是主循环里
     # ##############################
     # END of training loop
