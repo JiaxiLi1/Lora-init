@@ -1863,16 +1863,39 @@ def main(args):
                     return False, "None"
                 if isinstance(tensor, tuple):
                     tensor = tensor[0]
+                
+                # Skip integer tensors - they can't have NaN/Inf
+                if not torch.is_floating_point(tensor) and not torch.is_complex(tensor):
+                    return False, {
+                        "dtype": str(tensor.dtype),
+                        "shape": list(tensor.shape),
+                        "is_integer": True
+                    }
+                
                 has_nan = torch.isnan(tensor).any().item()
                 has_inf = torch.isinf(tensor).any().item()
-                stats = {
-                    "has_nan": has_nan,
-                    "has_inf": has_inf,
-                    "min": tensor.min().item() if not has_nan else "NaN",
-                    "max": tensor.max().item() if not has_nan else "NaN",
-                    "mean": tensor.mean().item() if not has_nan else "NaN",
-                    "shape": list(tensor.shape)
-                }
+                
+                # Only compute statistics if tensor is floating point
+                if has_nan or has_inf:
+                    stats = {
+                        "has_nan": has_nan,
+                        "has_inf": has_inf,
+                        "min": "NaN/Inf present",
+                        "max": "NaN/Inf present",
+                        "mean": "NaN/Inf present",
+                        "shape": list(tensor.shape),
+                        "dtype": str(tensor.dtype)
+                    }
+                else:
+                    stats = {
+                        "has_nan": has_nan,
+                        "has_inf": has_inf,
+                        "min": tensor.min().item(),
+                        "max": tensor.max().item(),
+                        "mean": tensor.mean().item(),
+                        "shape": list(tensor.shape),
+                        "dtype": str(tensor.dtype)
+                    }
                 return has_nan or has_inf, stats
             
             def forward_hook(module, input, output, module_name):
@@ -1907,7 +1930,8 @@ def main(args):
                     if not stats['has_nan']:
                         print(f"   Min: {stats['min']:.6f}, Max: {stats['max']:.6f}, Mean: {stats['mean']:.6f}")
                     
-                    # 如果是LowRankLinear，检查A和B矩阵
+                    # 检查各种矩阵的状态
+                    # Check LowRankLinear A and B matrices
                     if hasattr(module, 'A') and hasattr(module, 'B'):
                         a_has_issue, a_stats = check_tensor_for_nan(module.A, "A")
                         b_has_issue, b_stats = check_tensor_for_nan(module.B, "B")
@@ -1915,6 +1939,25 @@ def main(args):
                             print(f"   A matrix has NaN/Inf! Shape: {a_stats['shape']}")
                         if b_has_issue:
                             print(f"   B matrix has NaN/Inf! Shape: {b_stats['shape']}")
+                    
+                    # Check weight_in and weight_out for low-rank modules
+                    if hasattr(module, 'weight_in') and hasattr(module, 'weight_out'):
+                        win_has_issue, win_stats = check_tensor_for_nan(module.weight_in, "weight_in")
+                        wout_has_issue, wout_stats = check_tensor_for_nan(module.weight_out, "weight_out")
+                        if win_has_issue:
+                            print(f"   weight_in has NaN/Inf! Stats: {win_stats}")
+                        if wout_has_issue:
+                            print(f"   weight_out has NaN/Inf! Stats: {wout_stats}")
+                        
+                        # Check gradients if available
+                        if module.weight_in.grad is not None:
+                            grad_has_issue, grad_stats = check_tensor_for_nan(module.weight_in.grad, "weight_in.grad")
+                            if grad_has_issue:
+                                print(f"   weight_in.grad has NaN/Inf! Stats: {grad_stats}")
+                        if module.weight_out.grad is not None:
+                            grad_has_issue, grad_stats = check_tensor_for_nan(module.weight_out.grad, "weight_out.grad")
+                            if grad_has_issue:
+                                print(f"   weight_out.grad has NaN/Inf! Stats: {grad_stats}")
                     
                     # 如果是activation 2:4相关层，输出更多信息
                     if "mlp" in module_name.lower() and args.activation_2by4:
@@ -1961,16 +2004,48 @@ def main(args):
             if args.activation_2by4 and args.dx_direct_sparse == 1:
                 print("\n[Split GEMM Specific Checks]")
                 print("  Split GEMM is active (95% sparse + 5% dense)")
+                print(f"  Activation sparse method: {args.activation_sparse_method}")
+                print(f"  Dense warmup steps: {args.activation_dense_warmup_steps}")
+                print(f"  Current step: {global_step}")
+                
+                # Check if we're past warmup
+                if global_step >= args.activation_dense_warmup_steps:
+                    print(f"  ✅ Activation 2:4 sparsity is ACTIVE (past warmup)")
+                else:
+                    print(f"  ⏳ Still in dense warmup phase")
+                
+                # Try to get debug info from the custom functions
                 try:
-                    from peft_pretraining.modeling_llama import ActivationSparse2to4LowRankFunctionSingle
-                    if hasattr(ActivationSparse2to4LowRankFunctionSingle, '_debug_info'):
-                        debug_info = ActivationSparse2to4LowRankFunctionSingle._debug_info
-                        if debug_info:
-                            print(f"  Last operation debug info:")
-                            for key, val in debug_info.items():
-                                print(f"    {key}: {val}")
-                except:
-                    pass
+                    from peft_pretraining.modeling_llama import (
+                        ActivationSparse2to4Function, 
+                        ActivationSparse2to4LowRankFunction,
+                        ActivationSparse2to4LowRankFunctionSingle
+                    )
+                    
+                    # Check all possible activation sparse functions
+                    for func_class in [ActivationSparse2to4Function, 
+                                       ActivationSparse2to4LowRankFunction,
+                                       ActivationSparse2to4LowRankFunctionSingle]:
+                        if func_class and hasattr(func_class, '_debug_info'):
+                            debug_info = func_class._debug_info
+                            if debug_info:
+                                print(f"\n  Debug info from {func_class.__name__}:")
+                                for key, val in debug_info.items():
+                                    print(f"    {key}: {val}")
+                except Exception as e:
+                    print(f"  Could not retrieve debug info: {e}")
+                
+                # Check for specific modules with activation sparsity
+                print("\n  Checking activation sparse modules:")
+                for name, module in model.named_modules():
+                    if hasattr(module, 'activation_sparse_method'):
+                        print(f"    {name}: method={module.activation_sparse_method}")
+                        if hasattr(module, 'scale_factor'):
+                            scale_val = module.scale_factor
+                            if torch.is_tensor(scale_val):
+                                print(f"      scale_factor: {scale_val.item() if scale_val.numel() == 1 else scale_val.shape}")
+                        if hasattr(module, 'sparsity_tracker'):
+                            print(f"      sparsity: {module.sparsity_tracker}")
             
             print("\n" + "=" * 80)
             print("Stopping training due to NaN loss.")
@@ -2051,6 +2126,7 @@ def main(args):
         
         # Update activation sparse step counter for dense warmup
         if args.activation_2by4:
+            from peft_pretraining.modeling_llama import ActivationSparse2to4Function, ActivationSparse2to4LowRankFunction
             if ActivationSparse2to4Function is not None and ActivationSparse2to4LowRankFunction is not None:
                 ActivationSparse2to4Function.increment_step()
                 ActivationSparse2to4LowRankFunction.increment_step()
