@@ -1847,20 +1847,11 @@ def main(args):
             print(f"[CRITICAL] Loss is NaN detected at step {global_step}, update_step {update_step}")
             print("=" * 80)
             
-            # 使用根本原因检测器
-            from nan_root_cause_detector import NaNRootCauseDetector, analyze_split_gemm_root_cause
-            from nan_detection_enhanced import NaNTracker, debug_split_gemm
-            from nan_operation_tracker import nan_op_tracker
+            # Use lightweight backward-only NaN detector
+            from backward_nan_detector import BackwardNaNDetector
             
-            root_cause_detector = NaNRootCauseDetector(model)
-            nan_tracker = NaNTracker(model, verbose=True)
-            
-            print("\n[Starting ROOT CAUSE analysis for NaN...]")
-            
-            # 启用操作级别的NaN追踪
-            print("\n[Enabling operation-level NaN tracking for re-run...]")
-            nan_op_tracker.reset()
-            nan_op_tracker.enable()
+            nan_detector = BackwardNaNDetector(model, args)
+            print("\n[Starting NaN detection focused on backward pass...]")
             
             # Keep old variables for compatibility
             hooks = []
@@ -1973,49 +1964,48 @@ def main(args):
                         if hasattr(module, 'scale_factor'):
                             print(f"   Scale factor: {module.scale_factor}")
             
-            # 注册hooks到所有层
-            for name, module in model.named_modules():
-                if len(list(module.children())) == 0:  # 只在叶子节点注册
-                    hook = module.register_forward_hook(
-                        lambda m, i, o, n=name: forward_hook(m, i, o, n)
-                    )
-                    hooks.append(hook)
+            # Skip forward hooks to save memory - we'll only track backward
             
-            # First, use root cause detector to find exact operation
-            print("\n[PHASE 1: Finding exact operation that creates NaN...]")
-            first_nan_op = root_cause_detector.analyze_forward_pass(batch, labels)
-            
-            # Then use enhanced tracker for detailed layer analysis
-            print("\n[PHASE 2: Layer-by-layer tracking...]")
+            # Use the lightweight detector
             try:
-                # 不使用no_grad，这样可以追踪backward
-                # Track the forward and backward pass with detailed analysis
-                loss_rerun, first_nan = nan_tracker.track_forward_backward(batch, labels)
+                loss_rerun = nan_detector.track_backward(batch, labels)
                 
-                # 关闭操作级别追踪并打印结果
-                nan_op_tracker.disable()
+                # Get and display summary
+                summary = nan_detector.get_summary()
+                if summary['total_nan_locations'] > 0:
+                    print(f"\n🔴 NaN Detection Summary:")
+                    print(f"  Total locations with NaN/Inf: {summary['total_nan_locations']}")
+                    print(f"  MLP layers affected: {summary['mlp_issues']}")
+                    print(f"  Attention layers affected: {summary['attn_issues']}")
+                    print(f"  Max NaN ratio: {summary['max_nan_ratio']:.2%}")
+                    
+                    # List first few problematic locations
+                    print("\n  First NaN locations:")
+                    for loc in summary['locations'][:5]:
+                        print(f"    - {loc.layer_name}.{loc.param_name}: NaN={loc.nan_ratio:.1%}")
                 
-                if nan_op_tracker.first_nan_operation:
-                    print("\n" + "="*80)
-                    print("🎯 Found exact NaN generation point!")
-                    print("="*80)
-                    op_summary = nan_op_tracker.get_summary()
-                    print(f"Total operations tracked: {op_summary['total_operations']}")
-                    print(f"Operations with NaN output: {op_summary['operations_with_nan_output']}")
-                else:
-                    print("\n⚠️ No NaN generation detected in tracked operations")
-                    print("NaN might be from:")
-                    print("  1. Custom CUDA kernels (Triton)")
-                    print("  2. In-place operations")
-                    print("  3. Gradient accumulation issues")
+                # Check if split_gemm kernels might be the cause
+                if args.activation_2by4 and args.dx_direct_sparse == 1:
+                    print("\n⚠️ Using split_gemm with activation 2:4")
+                    print("Possible causes:")
+                    print("  1. Split-GEMM kernel numerical instability")
+                    print("  2. Incorrect sparsity calculation in backward")
+                    print("  3. Scale factor issues in soft thresholding")
                 
-                # Check model parameters
+                # Check model parameters directly
                 print("\n[Checking model parameters for NaN/Inf...]")
-                param_issues = nan_tracker.check_model_parameters()
+                param_issues = []
+                for name, param in model.named_parameters():
+                    if param is not None:
+                        has_nan = torch.isnan(param).any().item()
+                        has_inf = torch.isinf(param).any().item()
+                        if has_nan or has_inf:
+                            param_issues.append((name, has_nan, has_inf, param.shape))
+                
                 if param_issues:
                     print(f"Found {len(param_issues)} parameters with NaN/Inf")
-                    for name, info in list(param_issues.items())[:5]:
-                        print(f"  {name}: NaN={info.has_nan}, Inf={info.has_inf}, Shape={info.shape}")
+                    for name, has_nan, has_inf, shape in param_issues[:5]:
+                        print(f"  {name}: NaN={has_nan}, Inf={has_inf}, Shape={shape}")
                     
                     # Special analysis for split_gemm if we're using activation 2:4
                     if args.activation_2by4 and args.dx_direct_sparse == 1:

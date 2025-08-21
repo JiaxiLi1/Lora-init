@@ -78,15 +78,16 @@ class NaNOperationTracker:
                         'has_inf': has_inf,
                         'nan_count': torch.isnan(result).sum().item() if has_nan else 0,
                         'inf_count': torch.isinf(result).sum().item() if has_inf else 0,
-                        'first_nan_idx': torch.where(torch.isnan(result))[0][0].item() if has_nan and result.numel() > 0 else None
+                        # Don't compute first_nan_idx to save memory
+                        'nan_ratio': torch.isnan(result).float().mean().item() if has_nan else 0
                     }
                 else:
                     output_info = {
                         'shape': list(result.shape),
                         'dtype': str(result.dtype),
-                        'min': result.min().item(),
-                        'max': result.max().item(),
-                        'mean': result.mean().item() if result.numel() > 0 else 0
+                        # Don't compute stats to save memory
+                        'has_nan': False,
+                        'has_inf': False
                     }
             
             # Track operation
