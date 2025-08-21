@@ -1841,16 +1841,22 @@ def main(args):
         # 先尝试正常forward
         loss = model(**batch, labels=labels).loss
         
-        # 如果检测到NaN，重新运行一次带详细追踪的forward
+        # 如果检测到NaN，使用增强的NaN追踪器进行详细分析
         if torch.isnan(loss):
             print("=" * 80)
             print(f"[CRITICAL] Loss is NaN detected at step {global_step}, update_step {update_step}")
             print("=" * 80)
             
-            # 立即重新运行一次forward并逐层追踪
-            print("\n[Starting detailed layer-by-layer NaN tracking...]")
+            # 使用根本原因检测器
+            from nan_root_cause_detector import NaNRootCauseDetector, analyze_split_gemm_root_cause
+            from nan_detection_enhanced import NaNTracker, debug_split_gemm
             
-            # 注册hooks来追踪每层
+            root_cause_detector = NaNRootCauseDetector(model)
+            nan_tracker = NaNTracker(model, verbose=True)
+            
+            print("\n[Starting ROOT CAUSE analysis for NaN...]")
+            
+            # Keep old variables for compatibility
             hooks = []
             nan_found_at = []
             
@@ -1969,32 +1975,83 @@ def main(args):
                     )
                     hooks.append(hook)
             
-            # 重新运行forward
-            print("\nRe-running forward pass with detailed tracking...")
+            # First, use root cause detector to find exact operation
+            print("\n[PHASE 1: Finding exact operation that creates NaN...]")
+            first_nan_op = root_cause_detector.analyze_forward_pass(batch, labels)
+            
+            # Then use enhanced tracker for detailed layer analysis
+            print("\n[PHASE 2: Layer-by-layer tracking...]")
             try:
                 with torch.no_grad():
-                    _ = model(**batch, labels=labels)
+                    # Track the forward and backward pass with detailed analysis
+                    loss_rerun, first_nan = nan_tracker.track_forward_backward(batch, labels)
+                    
+                    # Check model parameters
+                    print("\n[Checking model parameters for NaN/Inf...]")
+                    param_issues = nan_tracker.check_model_parameters()
+                    if param_issues:
+                        print(f"Found {len(param_issues)} parameters with NaN/Inf")
+                        for name, info in list(param_issues.items())[:5]:
+                            print(f"  {name}: NaN={info.has_nan}, Inf={info.has_inf}, Shape={info.shape}")
+                    
+                    # Special analysis for split_gemm if we're using activation 2:4
+                    if args.activation_2by4 and args.dx_direct_sparse == 1:
+                        print("\n[Analyzing Split-GEMM specific issues...]")
+                        # Find problematic layers
+                        for name, module in model.named_modules():
+                            if hasattr(module, 'weight_in') and hasattr(module, 'weight_out'):
+                                # Check if this is where NaN occurred
+                                if first_nan and name in first_nan.get('module', ''):
+                                    print(f"\n🔍 Detailed analysis of problematic layer: {name}")
+                                    
+                                    # Check weights
+                                    win_nan = torch.isnan(module.weight_in).any().item()
+                                    wout_nan = torch.isnan(module.weight_out).any().item()
+                                    if win_nan:
+                                        print(f"  ⚠️ weight_in contains NaN")
+                                        print(f"     Shape: {module.weight_in.shape}")
+                                        print(f"     NaN count: {torch.isnan(module.weight_in).sum().item()}")
+                                    if wout_nan:
+                                        print(f"  ⚠️ weight_out contains NaN")
+                                        print(f"     Shape: {module.weight_out.shape}")
+                                        print(f"     NaN count: {torch.isnan(module.weight_out).sum().item()}")
+                                    
+                                    # Check gradients if available
+                                    if hasattr(module.weight_in, 'grad') and module.weight_in.grad is not None:
+                                        win_grad_nan = torch.isnan(module.weight_in.grad).any().item()
+                                        if win_grad_nan:
+                                            print(f"  ⚠️ weight_in.grad contains NaN")
+                                            print(f"     Shape: {module.weight_in.grad.shape}")
+                                            print(f"     NaN count: {torch.isnan(module.weight_in.grad).sum().item()}")
+                                            # Debug the split_gemm computation
+                                            layer_id = f"layer_{id(module)}"
+                                            debug_split_gemm(module.weight_in.grad, module.weight_out, layer_id)
             except Exception as e:
                 print(f"\nException during re-run: {e}")
+                import traceback
+                traceback.print_exc()
             
-            # 移除hooks
+            # Remove hooks if any were created
             for hook in hooks:
                 hook.remove()
             
-            # 总结NaN发生位置
+            # Summary from enhanced tracker
             if nan_found_at:
                 print("\n" + "=" * 80)
-                print("[NaN/Inf First Occurrence Summary]")
-                first_nan = nan_found_at[0]
-                print(f"First NaN/Inf detected at: {first_nan['layer']}")
-                print(f"Type: {first_nan['type']}")
-                print(f"Stats: {first_nan['stats']}")
+                print("[NaN/Inf First Occurrence Summary from old detector]")
+                first_nan_old = nan_found_at[0]
+                print(f"First NaN/Inf detected at: {first_nan_old['layer']}")
+                print(f"Type: {first_nan_old['type']}")
+                print(f"Stats: {first_nan_old['stats']}")
                 
                 if len(nan_found_at) > 1:
                     print(f"\nTotal {len(nan_found_at)} NaN/Inf occurrences found")
                     print("Propagation path:")
                     for i, occurrence in enumerate(nan_found_at[:5]):  # 只显示前5个
                         print(f"  {i+1}. {occurrence['layer']} ({occurrence['type']})")
+            
+            # Enhanced tracker summary
+            nan_tracker.summarize_nan_propagation()
             
             # 特别检查split_gemm相关
             if args.activation_2by4 and args.dx_direct_sparse == 1:
