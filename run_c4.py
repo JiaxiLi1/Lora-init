@@ -36,11 +36,7 @@ from loro_torch.loro_optim import LOROAdamW
 from loro_torch.lowrank_module import LowRankLinear
 
 # Import activation sparse functions (moved to top to avoid UnboundLocalError)
-try:
-    from peft_pretraining.modeling_llama import ActivationSparse2to4Function, ActivationSparse2to4LowRankFunction
-except ImportError:
-    ActivationSparse2to4Function = None
-    ActivationSparse2to4LowRankFunction = None
+from peft_pretraining.modeling_llama import ActivationSparse2to4Function, ActivationSparse2to4LowRankFunction
 
 from sparse_fullrank_linear import (
     apply_sparse2to4_to_model,
@@ -1120,10 +1116,10 @@ def main(args):
     
     # Enable sparsity logging if requested (set early to ensure it's available)
     if args.wandb_sparsityrelu:
-        if ActivationSparse2to4Function is not None and ActivationSparse2to4LowRankFunction is not None:
-            ActivationSparse2to4Function._enable_sparsity_logging = True
-            ActivationSparse2to4LowRankFunction._enable_sparsity_logging = True
-            logger.info("📊 Activation sparsity logging enabled for wandb")
+        from peft_pretraining.modeling_llama import ActivationSparse2to4Function, ActivationSparse2to4LowRankFunction
+        ActivationSparse2to4Function._enable_sparsity_logging = True
+        ActivationSparse2to4LowRankFunction._enable_sparsity_logging = True
+        logger.info("📊 Activation sparsity logging enabled for wandb")
     
     if args.squ_relu != "silu":
         logger.info(f"🔧 Using {args.squ_relu} activation in MLP layers (no gate projection)")
