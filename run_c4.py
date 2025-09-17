@@ -494,6 +494,8 @@ def str_to_bool(value):
 def parse_args():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("--eval_commonsense", type=str_to_bool, default=True,
+                        help="Whether to evaluate on commonsense reasoning datasets after training")
     parser.add_argument(
         "--flip_rate",
         type=str_to_bool, default=False,
@@ -2504,6 +2506,52 @@ def main(args):
     df_eval_tmp = pd.DataFrame(df_eval_tmp)
     df_eval_all = pd.concat([df_eval_all, df_eval_tmp], ignore_index=True)
     df_eval_all.to_csv(f"{args.save_dir}/{runname}/eval_stats_{args.timestamp}.csv", index=False)
+
+    # Commonsense reasoning evaluation on 8 standard datasets
+    if global_rank == 0 and args.eval_commonsense:
+        logger.info("Starting commonsense reasoning evaluation on 8 standard datasets...")
+        logger.info("Datasets: BoolQ, PIQA, SIQA, HellaSwag, WinoGrande, ARC-Easy, ARC-Challenge, OBQA")
+
+        from commonsense_eval import evaluate_commonsense_reasoning
+
+        # Prepare model for evaluation
+        if not args.single_gpu:
+            eval_model = model.module
+        else:
+            eval_model = model
+
+        eval_model.eval()
+
+        # Run commonsense evaluation with both 0-shot and 5-shot
+        commonsense_results = evaluate_commonsense_reasoning(
+            eval_model,
+            tokenizer,
+            device=device,
+            save_dir=args.save_dir,
+            shots=[0, 5]  # Evaluate both 0-shot and 5-shot
+        )
+
+        # Log results to wandb
+        wandb_log_data = {}
+        for shot_type, results in commonsense_results.items():
+            for task, accuracy in results.items():
+                wandb_log_data[f"commonsense/{shot_type}/{task}"] = accuracy
+
+        wandb.log(wandb_log_data, step=global_step)
+
+        logger.info("=" * 60)
+        logger.info("FINAL COMMONSENSE REASONING RESULTS")
+        logger.info("=" * 60)
+
+        for shot_type, results in commonsense_results.items():
+            logger.info(f"\n{shot_type.upper()} Results:")
+            logger.info("-" * 40)
+            for task, accuracy in results.items():
+                if task != "commonsense_avg_accuracy":
+                    logger.info(f"  {task.replace('_accuracy', '').upper()}: {accuracy:.4f}")
+            logger.info(f"  AVERAGE: {results['commonsense_avg_accuracy']:.4f}")
+
+        logger.info("=" * 60)
 
     logger.info("Script finished successfully")
     print(f"Rank {global_rank} finished successfully")
