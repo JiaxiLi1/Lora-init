@@ -430,7 +430,7 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
                 y2_sparse = apply_soft_threshold_weights_2to4_sparsity(y2, weight_in2, layer_id, is_lowrank=True, weight_out=weight_out2)
             elif sparsity_method == "soft_dynamic":
                 # 获取层ID和当前步数
-                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) % 12
+                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) % ActivationSoftThresholdManager.get_num_hidden_layers()
                 current_step = getattr(ActivationSparse2to4LowRankFunction, '_global_training_step', 0)
                 # 从config获取calibration_samples
                 calibration_samples = getattr(ctx, 'calibration_samples', 100)
@@ -871,7 +871,7 @@ class ActivationSparse2to4Function(autograd.Function):
                 y2_sparse = apply_soft_threshold_weights_2to4_sparsity(y2, weight_out2, layer_id)
             elif sparsity_method == "soft_dynamic":
                 # 获取层ID和当前步数
-                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id_standard', 0) % 12
+                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id_standard', 0) % ActivationSoftThresholdManager.get_num_hidden_layers()
                 current_step = getattr(ActivationSparse2to4Function, '_global_training_step', 0)
                 # 从config获取calibration_samples
                 calibration_samples = getattr(ctx, 'calibration_samples', 100)
@@ -1158,7 +1158,7 @@ class ActivationSparse2to4LowRankFunctionSingle(autograd.Function):
             elif method == "mvue":
                 y2_sparse = apply_mvue_2to4_sparsity(y2)
             elif method == "soft_dynamic":
-                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) % 12
+                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) % ActivationSoftThresholdManager.get_num_hidden_layers()
                 current_step = getattr(ActivationSparse2to4LowRankFunctionSingle, '_global_training_step', 0)
                 y2_sparse = apply_soft_threshold_dynamic_activation_2to4_sparsity(y2, layer_id, current_step, dynamic_steps, calibration_samples)
                 ActivationSoftThresholdManager._current_layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) + 1
@@ -1519,7 +1519,7 @@ class ActivationSparse2to4CoLAFunction(autograd.Function):
                 layer_id = f"cola_{id(ctx)}_layer2"
                 y2_sparse = apply_soft_threshold_weights_2to4_sparsity(y2, weight_in2, layer_id, is_lowrank=True, weight_out=weight_out2)
             elif sparsity_method == "soft_dynamic":
-                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) % 12
+                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) % ActivationSoftThresholdManager.get_num_hidden_layers()
                 current_step = getattr(ActivationSparse2to4CoLAFunction, '_global_training_step', 0)
                 y2_sparse = apply_soft_threshold_dynamic_activation_2to4_sparsity(y2, layer_id, current_step, dynamic_steps, calibration_samples)
                 ActivationSoftThresholdManager._current_layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) + 1
@@ -1863,7 +1863,7 @@ class ActivationSparse2to4LoSTFunction(autograd.Function):
                 layer_id = f"lost_{id(ctx)}_layer2"
                 y2_sparse = apply_soft_threshold_weights_2to4_sparsity(y2, weight_in2, layer_id, is_lowrank=True, weight_out=weight_out2)
             elif sparsity_method == "soft_dynamic":
-                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) % 12
+                layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) % ActivationSoftThresholdManager.get_num_hidden_layers()
                 current_step = getattr(ActivationSparse2to4LoSTFunction, '_global_training_step', 0)
                 y2_sparse = apply_soft_threshold_dynamic_activation_2to4_sparsity(y2, layer_id, current_step, dynamic_steps, calibration_samples)
                 ActivationSoftThresholdManager._current_layer_id = getattr(ActivationSoftThresholdManager, '_current_layer_id', 0) + 1
@@ -2289,6 +2289,17 @@ class ActivationSoftThresholdManager:
     _last_update_step = {}   # 记录每层最后更新的步数 {layer_id: step}
     _calibration_data = {}   # 存储校准数据 {layer_id: [activations]}
     _is_calibrated = False   # 是否已完成固定模式的校准
+    _num_hidden_layers = None  # 存储模型层数
+
+    @classmethod
+    def set_num_hidden_layers(cls, num_layers):
+        """设置模型的隐藏层数量"""
+        cls._num_hidden_layers = num_layers
+
+    @classmethod
+    def get_num_hidden_layers(cls):
+        """获取模型的隐藏层数量，如果未设置则返回12作为默认值"""
+        return cls._num_hidden_layers if cls._num_hidden_layers is not None else 12
     
 
     
@@ -2964,6 +2975,9 @@ class LlamaModel(LlamaPreTrainedModel):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+
+        # 设置ActivationSoftThresholdManager的层数
+        ActivationSoftThresholdManager.set_num_hidden_layers(config.num_hidden_layers)
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)])
