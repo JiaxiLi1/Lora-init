@@ -1,0 +1,72 @@
+{
+  "60m": {
+    "config": {
+      "hidden_size": 512,
+      "intermediate_size": 1376,
+      "num_layers": 8,
+      "num_heads": 8
+    },
+    "results": {
+      "Full-rank (SwiGLU)": 0.4658222198486328,
+      "LoRO Low-rank (SwiGLU)": 0.25050878524780273,
+      "LoRO Low-rank (ReLU2)": 0.22910594940185547,
+      "LoRO Low-rank + 2:4 (ReLU2)": 0.7735323905944824
+    }
+  },
+  "130m": {
+    "config": {
+      "hidden_size": 768,
+      "intermediate_size": 2048,
+      "num_layers": 12,
+      "num_heads": 12
+    },
+    "results": {
+      "Full-rank (SwiGLU)": 0.8411288261413574,
+      "LoRO Low-rank (SwiGLU)": 0.4201698303222656,
+      "LoRO Low-rank (ReLU2)": 0.4042220115661621,
+      "LoRO Low-rank + 2:4 (ReLU2)": 0.9100246429443359
+    }
+  },
+  "350m": {
+    "config": {
+      "hidden_size": 1024,
+      "intermediate_size": 2736,
+      "num_layers": 24,
+      "num_heads": 16
+    },
+    "results": {
+      "Full-rank (SwiGLU)": 1.233201026916504,
+      "LoRO Low-rank (SwiGLU)": 0.5546712875366211,
+      "LoRO Low-rank (ReLU2)": 0.5355072021484375,
+      "LoRO Low-rank + 2:4 (ReLU2)": 1.1996865272521973
+    }
+  },
+  "1b": {
+    "config": {
+      "hidden_size": 2048,
+      "intermediate_size": 5461,
+      "num_layers": 24,
+      "num_heads": 32
+    },
+    "results": {
+      "Full-rank (SwiGLU)": 5.5150628089904785,
+      "LoRO Low-rank (SwiGLU)": 2.17620849609375,
+      "LoRO Low-rank (ReLU2)": 1.9879531860351562,
+      "LoRO Low-rank + 2:4 (ReLU2)": 2.777383327484131
+    }
+  },
+  "7b": {
+    "config": {
+      "hidden_size": 4096,
+      "intermediate_size": 11008,
+      "num_layers": 32,
+      "num_heads": 32
+    },
+    "results": {
+      "Full-rank (SwiGLU)": 15.71516752243042,
+      "LoRO Low-rank (SwiGLU)": 6.3951826095581055,
+      "LoRO Low-rank (ReLU2)": 6.063201427459717,
+      "LoRO Low-rank + 2:4 (ReLU2)": 8.06795358657837
+    }
+  }
+}

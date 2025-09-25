@@ -1,0 +1,94 @@
+\section{Methodology}
+
+In this section, we present our approach that combines Low-Rank Orthogonal (LORO) training with activation sparsification to achieve efficient neural network training. Our method integrates two key components: (1) low-rank decomposition of weight matrices using the LORO optimization framework, and (2) naive 2:4 sparsification of forward activations to enable hardware-accelerated sparse computation.
+
+\subsection{LORO Low-Rank Training Framework}
+
+We adopt the LORO (Low-Rank Orthogonal) training methodology as our foundation for parameter-efficient fine-tuning. The core principle of LORO is to decompose weight matrices into low-rank factors while maintaining training stability through orthogonal constraints.
+
+For a given linear layer with weight matrix $\mathbf{W} \in \mathbb{R}^{d_{out} \times d_{in}}$, LORO decomposes it into two low-rank matrices:
+\begin{equation}
+\mathbf{W} = \mathbf{A}\mathbf{B}
+\end{equation}
+where $\mathbf{A} \in \mathbb{R}^{d_{out} \times r}$ and $\mathbf{B} \in \mathbb{R}^{r \times d_{in}}$ with rank $r \ll \min(d_{out}, d_{in})$.
+
+The LORO optimization procedure involves:
+\begin{enumerate}
+\item \textbf{Initialization}: Initialize matrices $\mathbf{A}$ and $\mathbf{B}$ using Xavier initialization to ensure proper gradient flow.
+\item \textbf{Orthogonal Updates}: Apply specialized optimizers that maintain orthogonality constraints during training to prevent rank collapse.
+\item \textbf{Periodic Refresh}: Periodically refresh the low-rank decomposition to maintain representational capacity and training stability.
+\end{enumerate}
+
+We apply LORO decomposition to both attention and MLP layers, with configurable ranks $r_{attn}$ and $r_{mlp}$ for different layer types. In our experiments, we set $r_{attn} = r_{mlp} = 256$ to balance parameter efficiency with model expressiveness.
+
+\textbf{Choice of LORO over Alternatives}: We specifically choose LORO over other low-rank methods such as CoLA (which adds activation functions between low-rank factors) or LoST (which incorporates additional sparse matrices) for a critical practical reason: LORO maintains the cleanest inference pathway. After training completion, LORO's low-rank factors can be directly merged back into full-rank matrices without any additional computational components, resulting in the fastest possible inference speed. This is particularly important for our application where both training efficiency and deployment performance are priorities.
+
+\subsection{Model Architecture Modification}
+
+To facilitate activation sparsification, we modify the standard Transformer architecture by replacing the SwiGLU activation function in MLP layers with a simpler FFN structure using ReLU$^2$ activation:
+
+\begin{equation}
+\text{MLP}(\mathbf{x}) = \mathbf{W}_{down} \cdot \text{ReLU}^2(\mathbf{W}_{up} \mathbf{x})
+\end{equation}
+
+where $\text{ReLU}^2(\mathbf{z}) = (\max(0, \mathbf{z}))^2$. This modification serves two purposes:
+\begin{enumerate}
+\item \textbf{Simplified Structure}: Removes the gating mechanism, reducing computational overhead while maintaining nonlinearity.
+\item \textbf{Sparsity Induction}: ReLU$^2$ naturally produces high activation sparsity, making it suitable for structured sparsification.
+\end{enumerate}
+
+\subsection{Naive 2:4 Activation Sparsification}
+
+Our core contribution lies in applying structured 2:4 sparsification to forward activations. The 2:4 sparsity pattern requires that out of every consecutive 4 elements, exactly 2 are zero and 2 are non-zero, enabling efficient sparse matrix multiplication on modern GPUs.
+
+\subsubsection{Forward Pass Sparsification}
+
+For activation tensor $\mathbf{z} \in \mathbb{R}^{M \times N}$ after ReLU$^2$, we apply naive 2:4 sparsification element-wise along the feature dimension. The algorithm proceeds as follows:
+
+\begin{algorithm}[H]
+\caption{Naive 2:4 Activation Sparsification}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Activation tensor $\mathbf{z} \in \mathbb{R}^{M \times N}$
+\STATE \textbf{Output:} Sparsified tensor $\mathbf{z}_{sparse} \in \mathbb{R}^{M \times N}$
+\FOR{$i = 1$ to $M$}
+    \FOR{$j = 1$ to $N/4$}
+        \STATE $\mathbf{group} = \mathbf{z}[i, 4j-3:4j]$ \COMMENT{Extract group of 4 elements}
+        \STATE $\mathbf{abs\_group} = |\mathbf{group}|$ \COMMENT{Compute absolute values}
+        \STATE Find indices of top-2 largest values in $\mathbf{abs\_group}$
+        \STATE Set remaining 2 elements to zero
+        \STATE $\mathbf{z}_{sparse}[i, 4j-3:4j] = \mathbf{group}_{masked}$
+    \ENDFOR
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+This sparsification is implemented using efficient Triton kernels for GPU acceleration:
+
+\begin{equation}
+\text{sparsify}_{2:4}(\mathbf{z}) = \text{mask}_{top2}(\mathbf{z}) \odot \mathbf{z}
+\end{equation}
+
+where $\text{mask}_{top2}(\mathbf{z})$ generates a binary mask that preserves only the top-2 elements by absolute value in each group of 4.
+
+\subsubsection{Backward Pass with Straight-Through Estimator}
+
+During backpropagation, we employ the straight-through estimator (STE) to handle the non-differentiable sparsification operation. The gradient flows through the sparsified activations as if the sparsification operation were an identity function:
+
+\begin{equation}
+\frac{\partial \mathcal{L}}{\partial \mathbf{z}} = \frac{\partial \mathcal{L}}{\partial \mathbf{z}_{sparse}}
+\end{equation}
+
+This approximation allows gradient-based optimization to continue despite the discrete nature of the sparsification operation, following the principle that gradients should encourage the model to produce activations that are naturally sparse after the sparsification step.
+
+\subsection{Training Procedure}
+
+Our complete training procedure integrates LORO low-rank optimization with activation sparsification:
+
+\begin{enumerate}
+\item \textbf{Dense Warmup}: Train the model with dense activations for $N_{warmup}$ steps to establish stable representations.
+\item \textbf{Sparse Training}: Apply 2:4 activation sparsification to all forward passes while maintaining LORO low-rank constraints on weight matrices.
+\item \textbf{Gradient Computation}: Use straight-through estimator for activation gradients and standard backpropagation for LORO parameters.
+\item \textbf{Optimizer Updates}: Apply LORO-specific optimizers that respect orthogonality constraints and support periodic parameter refresh.
+\end{enumerate}
+
+The hyperparameters include: dense warmup steps $N_{warmup}$, LORO refresh frequency $f_{refresh}$, and rank values $r_{attn}$, $r_{mlp}$ for different layer types. This approach enables efficient training with both parameter reduction (through low-rank decomposition) and computational acceleration (through sparse activations) while maintaining model performance.

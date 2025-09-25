@@ -421,9 +421,7 @@ class ActivationSparse2to4LowRankFunction(autograd.Function):
         else:
             # Step 4: 第二个低秩全连接层 (Second Low-rank Linear Layer) - Sparse GEMM
             # Apply 2:4 sparsity to y2 (token-wise/row-wise)
-            if sparsity_method == "fast":
-                y2_sparse = apply_fast_2to4_sparsity(y2)
-            elif sparsity_method == "naive":
+            if sparsity_method == "naive":
                 y2_sparse = apply_naive_2to4_sparsity(y2)
             elif sparsity_method == "mvue":
                 y2_sparse = apply_mvue_2to4_sparsity(y2)
@@ -2086,37 +2084,6 @@ class ActivationSparse2to4LoSTFunction(autograd.Function):
 ActivationSparse2to4LowRankFunction_lost = ActivationSparse2to4LoSTFunction
 
 
-# Global cache for 2:4 masks
-_fast_2to4_mask_cache = {}
-
-def apply_fast_2to4_sparsity(input_tensor):
-    """
-    快速2:4稀疏化 - 使用预先创建的mask直接乘以tensor
-    在每4个元素中，保留前2个，把后2个设为0
-    """
-    assert input_tensor.dim() == 2, "apply_fast_2to4_sparsity expects a 2D tensor"
-
-    n_cols = input_tensor.shape[-1]
-    device = input_tensor.device
-    dtype = input_tensor.dtype
-
-    # Check if we have a cached mask for this size and device
-    cache_key = (n_cols, device)
-    if cache_key not in _fast_2to4_mask_cache:
-        # Create mask: 1 for keep, 0 for zero out
-        # Pattern: keep columns 0,1,4,5,8,9... zero out 2,3,6,7,10,11...
-        mask = torch.ones(n_cols, dtype=dtype, device=device)
-        mask[2::4] = 0  # Zero out every 3rd column in groups of 4
-        mask[3::4] = 0  # Zero out every 4th column in groups of 4
-        _fast_2to4_mask_cache[cache_key] = mask
-
-    mask = _fast_2to4_mask_cache[cache_key]
-
-    # Apply mask - broadcasting will handle the batch dimension
-    output = input_tensor * mask
-
-    return output
-
 def apply_naive_2to4_sparsity(input_tensor):
     """
     使用 Triton 实现的 naive 2:4 稀疏化（调用 naive24_triton），严格不使用 dense 回退。
@@ -2687,17 +2654,14 @@ class LlamaMLP(nn.Module):
                 
                 if is_lowrank:
                     # Use low-rank version of activation 2:4 sparsity
-                    # Note: LowRankLinear may or may not have bias attribute
-                    bias1 = getattr(self.up_proj, 'bias', None)
-                    bias2 = getattr(self.down_proj, 'bias', None)
                     return ActivationSparse2to4LowRankFunction.apply(
                         x,                          # input
                         self.up_proj.weight_in,     # weight_in1
                         self.up_proj.weight_out,    # weight_out1
                         self.down_proj.weight_in,   # weight_in2
                         self.down_proj.weight_out,  # weight_out2
-                        bias1,                      # bias1
-                        bias2,                      # bias2
+                        self.up_proj.bias,          # bias1
+                        self.down_proj.bias,        # bias2
                         sparsity_method,            # sparsity method
                         warmup_steps,               # warmup steps
                         dx_direct_sparse,           # dx computation method
